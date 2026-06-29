@@ -1,11 +1,14 @@
 from .client import TitanClient, TitanJob
-from .operations import OperationRegistry, default_operations
+from .diagnostics import DiagnosticsRegistry, build_diagnostics
+from .operations import OperationRegistry, Operation
 from .version import SDK_VERSION
 
 __all__ = [
     "TitanClient",
     "TitanJob",
     "OperationRegistry",
-    "default_operations",
+    "Operation",
+    "DiagnosticsRegistry",
+    "build_diagnostics",
     "SDK_VERSION",
 ]

@@ -1,96 +1,126 @@
-VALID_OPERATION_TYPES = {
-    "action",
-    "diagnostic",
-    "report",
-    "maintenance",
-    "control",
-}
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+
+@dataclass
+class Operation:
+    id: str
+    label: str
+    description: str = ""
+    type: str = "action"
+    enabled: bool = False
+    requires_confirmation: bool = True
+    permission: str = "owner"
+    reason: str = "Remote execution is locked until Titan OS permissions are complete."
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "key": self.id,
+            "label": self.label,
+            "name": self.label,
+            "description": self.description,
+            "type": self.type,
+            "operation_type": self.type,
+            "enabled": self.enabled,
+            "requires_confirmation": self.requires_confirmation,
+            "permission": self.permission,
+            "reason": self.reason,
+            "metadata": self.metadata,
+        }
 
 
 class OperationRegistry:
     def __init__(self):
-        self._operations = []
+        self._operations: Dict[str, Operation] = {}
 
     def add(
         self,
-        operation_id,
-        label,
-        description="",
-        operation_type="action",
-        enabled=False,
-        requires_confirmation=True,
-        permission="owner",
-        reason="Remote execution is locked until Titan OS permissions are complete.",
-        metadata=None,
+        operation_id: Optional[str] = None,
+        label: Optional[str] = None,
+        description: str = "",
+        operation_type: str = "action",
+        enabled: bool = False,
+        requires_confirmation: bool = True,
+        permission: str = "owner",
+        reason: str = "Remote execution is locked until Titan OS permissions are complete.",
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
     ):
-        operation_type = operation_type if operation_type in VALID_OPERATION_TYPES else "action"
+        operation_id = operation_id or kwargs.get("id") or kwargs.get("key")
+        if not operation_id:
+            raise ValueError("operation_id is required")
+        label = label or kwargs.get("name") or kwargs.get("label") or operation_id
+        operation_type = operation_type or kwargs.get("type", "action")
 
-        operation = {
-            "id": str(operation_id),
-            "label": str(label),
-            "description": str(description or ""),
-            "type": operation_type,
-            "enabled": bool(enabled),
-            "requires_confirmation": bool(requires_confirmation),
-            "permission": str(permission or "owner"),
-            "reason": str(reason or ""),
-            "metadata": metadata or {},
-        }
+        operation = Operation(
+            id=operation_id,
+            label=label,
+            description=description or kwargs.get("description", ""),
+            type=operation_type,
+            enabled=enabled,
+            requires_confirmation=requires_confirmation,
+            permission=permission,
+            reason=reason,
+            metadata=metadata or kwargs.get("metadata", {}),
+        )
+        self._operations[operation.id] = operation
+        return operation.to_dict()
 
-        self.remove(operation["id"])
-        self._operations.append(operation)
-
-        return operation
+    def operation(self, key=None, name=None, **kwargs):
+        return self.add(operation_id=key, label=name, **kwargs)
 
     def remove(self, operation_id):
-        operation_id = str(operation_id)
-        self._operations = [
-            operation
-            for operation in self._operations
-            if operation.get("id") != operation_id
-        ]
+        self._operations.pop(operation_id, None)
 
     def clear(self):
-        self._operations = []
+        self._operations.clear()
 
-    def all(self):
-        return list(self._operations)
+    def get(self, operation_id):
+        operation = self._operations.get(operation_id)
+        return operation.to_dict() if operation else None
+
+    def all(self) -> List[Dict[str, Any]]:
+        return [operation.to_dict() for operation in self._operations.values()]
+
+    def count(self) -> int:
+        return len(self._operations)
 
 
 def default_operations():
-    registry = OperationRegistry()
-
-    registry.add(
-        operation_id="diagnostics",
-        label="Run Diagnostics",
-        description="Collect SDK diagnostics and service runtime information.",
-        operation_type="diagnostic",
-        enabled=False,
-        requires_confirmation=False,
-        permission="owner",
-        reason="Read-only diagnostics execution from Titan OS is not enabled yet.",
-    )
-
-    registry.add(
-        operation_id="refresh_status",
-        label="Refresh Status",
-        description="Ask the service to send a fresh status update.",
-        operation_type="report",
-        enabled=False,
-        requires_confirmation=False,
-        permission="owner",
-        reason="Remote status refresh is not enabled yet.",
-    )
-
-    registry.add(
-        operation_id="restart_service",
-        label="Restart Service",
-        description="Safely restart the service.",
-        operation_type="control",
-        enabled=False,
-        requires_confirmation=True,
-        permission="owner",
-        reason="Remote restart is locked until Titan OS command permissions are complete.",
-    )
-
-    return registry.all()
+    return [
+        {
+            "id": "view_status",
+            "label": "View Status",
+            "description": "View current service status and health.",
+            "type": "read",
+            "enabled": True,
+            "requires_confirmation": False,
+            "permission": "viewer",
+            "reason": "Read-only operation.",
+            "metadata": {},
+        },
+        {
+            "id": "view_metrics",
+            "label": "View Metrics",
+            "description": "View service metrics reported by the SDK.",
+            "type": "read",
+            "enabled": True,
+            "requires_confirmation": False,
+            "permission": "viewer",
+            "reason": "Read-only operation.",
+            "metadata": {},
+        },
+        {
+            "id": "view_diagnostics",
+            "label": "View Diagnostics",
+            "description": "View runtime diagnostics for troubleshooting.",
+            "type": "read",
+            "enabled": True,
+            "requires_confirmation": False,
+            "permission": "viewer",
+            "reason": "Read-only operation.",
+            "metadata": {},
+        },
+    ]
