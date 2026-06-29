@@ -1,0 +1,22 @@
+def build_diagnostics(client):
+    return {
+        "service_key": client.service_key,
+        "name": client.name,
+        "version": client.version,
+        "category": client.category,
+        "hostname": client.hostname,
+        "started_at": client.started_at,
+        "uptime_seconds": client.uptime_seconds(),
+        "sdk_name": client.sdk_name,
+        "sdk_version": client.sdk_version,
+        "queue_size": client.queue_size(),
+        "last_successful_post": client.last_successful_post,
+        "last_failed_post": client.last_failed_post,
+        "successful_posts": client.successful_posts,
+        "failed_posts": client.failed_posts,
+        "events_sent": client.events_sent,
+        "metrics_sent": client.metrics_sent,
+        "heartbeats_sent": client.heartbeats_sent,
+        "is_ready": client.is_ready(),
+        **client.health_payload(),
+    }
