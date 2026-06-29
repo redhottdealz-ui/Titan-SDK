@@ -1,23 +1,16 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "titan-sdk"
-version = "1.0.0"
-description = "Titan SDK for service registration, heartbeat, status, metrics, and event reporting."
+version = "1.0.1"
+description = "Titan SDK for service registration, heartbeat, metrics, and events."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [
-  { name = "Titan Legends" }
-]
 dependencies = [
-  "requests>=2.31.0"
+    "requests>=2.31.0"
 ]
 
-[project.urls]
-Homepage = "https://github.com/redhottdealz/Titan-SDK"
-Repository = "https://github.com/redhottdealz/Titan-SDK"
-
-[tool.setuptools.packages.find]
-include = ["titan_sdk*"]
+[tool.setuptools]
+packages = ["titan_sdk"]
