@@ -1,24 +1,23 @@
 import os
-import socket
 import time
 import threading
-from collections import deque
-from datetime import datetime, timezone
 
 import requests
 
 from .constants import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_QUEUE_FLUSH_INTERVAL,
-    DEFAULT_QUEUE_RETRY_DELAY,
+    DEFAULT_RETRY_BASE_DELAY,
+    DEFAULT_RETRY_MAX_ATTEMPTS,
+    DEFAULT_RETRY_MAX_DELAY,
     DEFAULT_TIMEOUT,
     SDK_NAME,
 )
+from .diagnostics import build_diagnostics
+from .logger import build_logger
+from .retry import RetryQueue
+from .runtime import get_hostname, uptime_seconds, utc_now_iso
 from .version import SDK_VERSION
-
-
-def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat()
 
 
 class TitanClient:
@@ -60,27 +59,36 @@ class TitanClient:
         self.enabled = enabled
         self.max_queue_size = max_queue_size
 
-        self.hostname = socket.gethostname()
+        self.hostname = get_hostname()
         self.started_at = utc_now_iso()
         self.sdk_name = SDK_NAME
         self.sdk_version = SDK_VERSION
 
+        self.logger = build_logger(f"Titan SDK:{self.service_key}")
+
         self._running = False
         self._heartbeat_thread = None
         self._queue_thread = None
-        self._queue = deque(maxlen=max_queue_size)
         self._queue_lock = threading.Lock()
+        self._queue = RetryQueue(max_size=max_queue_size)
+
+        self.last_successful_post = None
+        self.last_failed_post = None
+        self.successful_posts = 0
+        self.failed_posts = 0
+        self.events_sent = 0
+        self.metrics_sent = 0
+        self.heartbeats_sent = 0
 
     def uptime_seconds(self):
-        try:
-            started = datetime.fromisoformat(self.started_at)
-            return int((datetime.now(timezone.utc) - started).total_seconds())
-        except Exception:
-            return 0
+        return uptime_seconds(self.started_at)
 
     def queue_size(self):
         with self._queue_lock:
-            return len(self._queue)
+            return self._queue.size()
+
+    def diagnostics(self):
+        return build_diagnostics(self)
 
     def health_payload(self):
         if not self.enabled:
@@ -109,7 +117,7 @@ class TitanClient:
 
         return {
             "health_status": "healthy",
-            "health_message": "SDK reporting is active.",
+            "health_message": "Service is operating normally.",
         }
 
     def runtime_payload(self):
@@ -120,11 +128,28 @@ class TitanClient:
             "sdk_version": self.sdk_version,
             "uptime_seconds": self.uptime_seconds(),
             "queue_size": self.queue_size(),
+            "successful_posts": self.successful_posts,
+            "failed_posts": self.failed_posts,
+            "events_sent": self.events_sent,
+            "metrics_sent": self.metrics_sent,
+            "heartbeats_sent": self.heartbeats_sent,
+            "last_successful_post": self.last_successful_post,
+            "last_failed_post": self.last_failed_post,
             **self.health_payload(),
         }
 
     def is_ready(self):
         return bool(self.enabled and self.base_url and self.api_key)
+
+    def config_report(self):
+        return {
+            "enabled": self.enabled,
+            "base_url_configured": bool(self.base_url),
+            "api_key_configured": bool(self.api_key),
+            "service_key": self.service_key,
+            "name": self.name,
+            "sdk_version": self.sdk_version,
+        }
 
     def _headers(self):
         return {
@@ -143,54 +168,77 @@ class TitanClient:
             timeout=self.timeout,
         )
         response.raise_for_status()
+
+        self.last_successful_post = utc_now_iso()
+        self.successful_posts += 1
+
         return True
 
     def _queue_post(self, path, payload):
         with self._queue_lock:
-            self._queue.append({
-                "path": path,
-                "payload": payload,
-                "queued_at": utc_now_iso(),
-            })
+            self._queue.push(path, payload)
 
     def _post(self, path, payload, allow_queue=True):
         if not self.is_ready():
-            print("[Titan SDK] Client not configured. Check TITAN_OS_BASE_URL/TITAN_OS_URL and TITAN_OS_API_KEY.")
+            self.logger.warning(
+                "Client not configured. Check TITAN_OS_BASE_URL/TITAN_OS_URL and TITAN_OS_API_KEY."
+            )
+            self.last_failed_post = utc_now_iso()
+            self.failed_posts += 1
             return False
 
         try:
             return self._send_now(path, payload)
 
         except Exception as error:
-            print(f"[Titan SDK] POST failed for {path}: {error}")
+            self.logger.error("POST failed for %s: %s", path, error)
+
+            self.last_failed_post = utc_now_iso()
+            self.failed_posts += 1
 
             if allow_queue:
                 self._queue_post(path, payload)
-                print(f"[Titan SDK] Queued failed request: {path}")
+                self.logger.warning("Queued failed request: %s", path)
 
             return False
+
+    def _retry_delay(self, attempts):
+        delay = DEFAULT_RETRY_BASE_DELAY * (2 ** max(0, attempts - 1))
+        return min(delay, DEFAULT_RETRY_MAX_DELAY)
 
     def _flush_queue_once(self):
         if not self.is_ready():
             return
 
         with self._queue_lock:
-            if not self._queue:
-                return
+            item = self._queue.pop()
 
-            item = self._queue.popleft()
+        if not item:
+            return
+
+        item["attempts"] = int(item.get("attempts", 0)) + 1
 
         try:
             self._send_now(item["path"], item["payload"])
-            print(f"[Titan SDK] Flushed queued request: {item['path']}")
+            self.logger.info("Flushed queued request: %s", item["path"])
 
         except Exception as error:
-            print(f"[Titan SDK] Queue flush failed: {error}")
+            self.logger.error("Queue flush failed: %s", error)
 
-            with self._queue_lock:
-                self._queue.appendleft(item)
+            self.last_failed_post = utc_now_iso()
+            self.failed_posts += 1
 
-            time.sleep(DEFAULT_QUEUE_RETRY_DELAY)
+            if item["attempts"] < DEFAULT_RETRY_MAX_ATTEMPTS:
+                with self._queue_lock:
+                    self._queue.push_front(item)
+
+                time.sleep(self._retry_delay(item["attempts"]))
+            else:
+                self.logger.error(
+                    "Dropped queued request after %s attempts: %s",
+                    item["attempts"],
+                    item["path"],
+                )
 
     def _queue_loop(self):
         while self._running:
@@ -213,9 +261,9 @@ class TitanClient:
         ok = self._post("/api/register-service", payload)
 
         if ok:
-            print(f"[Titan SDK] Registered service: {self.service_key}")
+            self.logger.info("Registered service: %s", self.service_key)
         else:
-            print(f"[Titan SDK] Failed to register service: {self.service_key}")
+            self.logger.error("Failed to register service: %s", self.service_key)
 
         return ok
 
@@ -229,7 +277,12 @@ class TitanClient:
             **self.runtime_payload(),
         }
 
-        return self._post("/api/heartbeat", payload, allow_queue=False)
+        ok = self._post("/api/heartbeat", payload, allow_queue=False)
+
+        if ok:
+            self.heartbeats_sent += 1
+
+        return ok
 
     def status(self, status="healthy", current_state="Running", metrics=None):
         payload = {
@@ -256,7 +309,12 @@ class TitanClient:
             **self.runtime_payload(),
         }
 
-        return self._post("/api/event", payload)
+        ok = self._post("/api/event", payload)
+
+        if ok:
+            self.events_sent += 1
+
+        return ok
 
     def metric(self, name, value):
         return self.metrics({name: value})
@@ -269,7 +327,12 @@ class TitanClient:
             **self.runtime_payload(),
         }
 
-        return self._post("/api/metrics", payload)
+        ok = self._post("/api/metrics", payload)
+
+        if ok:
+            self.metrics_sent += 1
+
+        return ok
 
     def warning(self, title, message=None):
         return self.event(title, message, level="warning")
@@ -287,18 +350,21 @@ class TitanClient:
 
     def start(self):
         if not self.enabled:
-            print("[Titan SDK] Disabled.")
-            return False
-
-        if not self.is_ready():
-            print("[Titan SDK] Not ready. Missing TITAN_OS_BASE_URL/TITAN_OS_URL or TITAN_OS_API_KEY.")
+            self.logger.warning("SDK disabled.")
             return False
 
         if self._running:
-            print(f"[Titan SDK] Service already running: {self.service_key}")
+            self.logger.info("Service already running: %s", self.service_key)
             return True
 
-        print(f"[Titan SDK] Starting service: {self.service_key}")
+        self.logger.info("Starting service: %s", self.service_key)
+        self.logger.info("Config report: %s", self.config_report())
+
+        if not self.is_ready():
+            self.logger.error(
+                "Not ready. Missing TITAN_OS_BASE_URL/TITAN_OS_URL or TITAN_OS_API_KEY."
+            )
+            return False
 
         self._running = True
 
@@ -321,14 +387,20 @@ class TitanClient:
 
         self.status(status="healthy", current_state="Running")
 
-        print(f"[Titan SDK] Service running: {self.service_key}")
+        self.logger.info("Service running: %s", self.service_key)
 
         return True
 
     def stop(self):
+        if not self._running:
+            self.logger.info("Service already stopped: %s", self.service_key)
+            return True
+
         self._running = False
 
         self.status(status="offline", current_state="Stopped")
         self.event("Service stopped", f"{self.name} stopped.")
 
-        print(f"[Titan SDK] Service stopped: {self.service_key}")
+        self.logger.info("Service stopped: %s", self.service_key)
+
+        return True
