@@ -7,7 +7,13 @@ from datetime import datetime, timezone
 
 import requests
 
-from .constants import DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_TIMEOUT, SDK_NAME
+from .constants import (
+    DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_QUEUE_FLUSH_INTERVAL,
+    DEFAULT_QUEUE_RETRY_DELAY,
+    DEFAULT_TIMEOUT,
+    SDK_NAME,
+)
 from .version import SDK_VERSION
 
 
@@ -40,7 +46,13 @@ class TitanClient:
         self.route = route or f"/services/{service_key}"
         self.capabilities = capabilities or []
 
-        self.base_url = (base_url or os.getenv("TITAN_OS_BASE_URL") or "").rstrip("/")
+        self.base_url = (
+            base_url
+            or os.getenv("TITAN_OS_BASE_URL")
+            or os.getenv("TITAN_OS_URL")
+            or ""
+        ).rstrip("/")
+
         self.api_key = api_key or os.getenv("TITAN_OS_API_KEY")
 
         self.heartbeat_interval = heartbeat_interval
@@ -66,6 +78,40 @@ class TitanClient:
         except Exception:
             return 0
 
+    def queue_size(self):
+        with self._queue_lock:
+            return len(self._queue)
+
+    def health_payload(self):
+        if not self.enabled:
+            return {
+                "health_status": "disabled",
+                "health_message": "Titan SDK reporting is disabled.",
+            }
+
+        if not self.base_url:
+            return {
+                "health_status": "warning",
+                "health_message": "Titan OS base URL is not configured.",
+            }
+
+        if not self.api_key:
+            return {
+                "health_status": "warning",
+                "health_message": "Titan OS API key is not configured.",
+            }
+
+        if self.queue_size() > 0:
+            return {
+                "health_status": "warning",
+                "health_message": f"{self.queue_size()} request(s) waiting in SDK retry queue.",
+            }
+
+        return {
+            "health_status": "healthy",
+            "health_message": "SDK reporting is active.",
+        }
+
     def runtime_payload(self):
         return {
             "hostname": self.hostname,
@@ -73,6 +119,8 @@ class TitanClient:
             "sdk_name": self.sdk_name,
             "sdk_version": self.sdk_version,
             "uptime_seconds": self.uptime_seconds(),
+            "queue_size": self.queue_size(),
+            **self.health_payload(),
         }
 
     def is_ready(self):
@@ -107,7 +155,7 @@ class TitanClient:
 
     def _post(self, path, payload, allow_queue=True):
         if not self.is_ready():
-            print("[Titan SDK] Client not configured. Check TITAN_OS_BASE_URL and TITAN_OS_API_KEY.")
+            print("[Titan SDK] Client not configured. Check TITAN_OS_BASE_URL/TITAN_OS_URL and TITAN_OS_API_KEY.")
             return False
 
         try:
@@ -142,12 +190,12 @@ class TitanClient:
             with self._queue_lock:
                 self._queue.appendleft(item)
 
-            time.sleep(10)
+            time.sleep(DEFAULT_QUEUE_RETRY_DELAY)
 
     def _queue_loop(self):
         while self._running:
             self._flush_queue_once()
-            time.sleep(5)
+            time.sleep(DEFAULT_QUEUE_FLUSH_INTERVAL)
 
     def register_service(self):
         payload = {
@@ -243,7 +291,7 @@ class TitanClient:
             return False
 
         if not self.is_ready():
-            print("[Titan SDK] Not ready. Missing TITAN_OS_BASE_URL or TITAN_OS_API_KEY.")
+            print("[Titan SDK] Not ready. Missing TITAN_OS_BASE_URL/TITAN_OS_URL or TITAN_OS_API_KEY.")
             return False
 
         if self._running:
