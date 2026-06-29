@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "titan-sdk"
-version = "1.2.0"
-description = "Titan SDK for service registration, heartbeat, metrics, events, diagnostics, runtime telemetry, and operations metadata."
+version = "1.3.1"
+description = "Titan SDK for service registration, heartbeat, metrics, events, diagnostics, runtime telemetry, operations metadata, and operations intelligence and scheduled job telemetry."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
