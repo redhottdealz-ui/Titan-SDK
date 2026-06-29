@@ -15,6 +15,7 @@ from .constants import (
 )
 from .diagnostics import build_diagnostics
 from .logger import build_logger
+from .operations import OperationRegistry, default_operations
 from .retry import RetryQueue
 from .runtime import get_hostname, uptime_seconds, utc_now_iso
 from .version import SDK_VERSION
@@ -30,6 +31,8 @@ class TitanClient:
         icon="⚙️",
         route=None,
         capabilities=None,
+        operations=None,
+        include_default_operations=True,
         base_url=None,
         api_key=None,
         heartbeat_interval=DEFAULT_HEARTBEAT_INTERVAL,
@@ -44,6 +47,25 @@ class TitanClient:
         self.icon = icon
         self.route = route or f"/services/{service_key}"
         self.capabilities = capabilities or []
+
+        self.operation_registry = OperationRegistry()
+
+        if include_default_operations:
+            for operation in default_operations():
+                self.operation_registry.add(**{
+                    "operation_id": operation["id"],
+                    "label": operation["label"],
+                    "description": operation.get("description", ""),
+                    "operation_type": operation.get("type", "action"),
+                    "enabled": operation.get("enabled", False),
+                    "requires_confirmation": operation.get("requires_confirmation", True),
+                    "permission": operation.get("permission", "owner"),
+                    "reason": operation.get("reason", ""),
+                    "metadata": operation.get("metadata", {}),
+                })
+
+        for operation in operations or []:
+            self.add_operation(**operation)
 
         self.base_url = (
             base_url
@@ -79,6 +101,39 @@ class TitanClient:
         self.events_sent = 0
         self.metrics_sent = 0
         self.heartbeats_sent = 0
+
+    def add_operation(
+        self,
+        operation_id,
+        label,
+        description="",
+        operation_type="action",
+        enabled=False,
+        requires_confirmation=True,
+        permission="owner",
+        reason="Remote execution is locked until Titan OS permissions are complete.",
+        metadata=None,
+    ):
+        return self.operation_registry.add(
+            operation_id=operation_id,
+            label=label,
+            description=description,
+            operation_type=operation_type,
+            enabled=enabled,
+            requires_confirmation=requires_confirmation,
+            permission=permission,
+            reason=reason,
+            metadata=metadata,
+        )
+
+    def remove_operation(self, operation_id):
+        self.operation_registry.remove(operation_id)
+
+    def clear_operations(self):
+        self.operation_registry.clear()
+
+    def operations(self):
+        return self.operation_registry.all()
 
     def uptime_seconds(self):
         return uptime_seconds(self.started_at)
@@ -135,6 +190,7 @@ class TitanClient:
             "heartbeats_sent": self.heartbeats_sent,
             "last_successful_post": self.last_successful_post,
             "last_failed_post": self.last_failed_post,
+            "operations": self.operations(),
             **self.health_payload(),
         }
 
@@ -149,6 +205,7 @@ class TitanClient:
             "service_key": self.service_key,
             "name": self.name,
             "sdk_version": self.sdk_version,
+            "operations_registered": len(self.operations()),
         }
 
     def _headers(self):
@@ -254,6 +311,7 @@ class TitanClient:
             "icon": self.icon,
             "route": self.route,
             "capabilities": self.capabilities,
+            "operations": self.operations(),
             "registered_at": utc_now_iso(),
             **self.runtime_payload(),
         }
