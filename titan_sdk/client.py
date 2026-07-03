@@ -827,23 +827,52 @@ class TitanClient:
             self.increment("status_sent")
         return ok
 
-    def event(self, title, message=None, level="info", data=None):
+    def event(
+        self,
+        title,
+        message=None,
+        level="info",
+        data=None,
+        event_type=None,
+        subject_id=None,
+        subject_type=None,
+        correlation_id=None,
+        tags=None,
+        source_service=None,
+        platform_event=None,
+        **metadata,
+    ):
+        """Publish a Titan event.
+
+        Backward compatible with Titan SDK v1.4.0 while adding Titan SDK
+        v1.5.0 Platform Event metadata. Existing calls such as
+        titan.event(title="Started", message="...") continue to work.
+
+        Optional typed-event fields let services coordinate without direct
+        bot-to-bot coupling, for example event_type="member.hiatus.started".
+        """
         if level == "warning":
             self.increment("warnings")
         if level in ("error", "critical", "failed"):
             self.increment("errors")
+
+        created_at = utc_now_iso()
+        event_data = data or {}
+        is_platform_event = bool(platform_event or event_type)
+
         self._last_event_title = title
         self._last_event_level = level
+
         payload = {
             "service_key": self.service_key,
             "module": self.name,
             "title": title,
             "message": message or title,
             "level": level,
-            "source": self.name,
-            "created_at": utc_now_iso(),
+            "source": source_service or self.name,
+            "created_at": created_at,
             "version": self.version,
-            "data": data or {},
+            "data": event_data,
             "sdk": {
                 "sdk_name": self.sdk_name,
                 "sdk_version": self.sdk_version,
@@ -851,11 +880,62 @@ class TitanClient:
                 "service_type": self.service_type,
             },
         }
+
+        if is_platform_event:
+            platform_payload = {
+                "event_type": event_type or title,
+                "subject_id": str(subject_id) if subject_id is not None else None,
+                "subject_type": subject_type,
+                "correlation_id": correlation_id,
+                "tags": list(tags or []),
+                "source_service": source_service or self.service_key,
+                "published_at": created_at,
+                "metadata": metadata or {},
+            }
+            clean_platform_payload = {
+                key: value for key, value in platform_payload.items()
+                if value not in (None, "", [])
+            }
+            payload.update(clean_platform_payload)
+            payload["platform_event"] = True
+
         ok = self._post("/api/event", payload)
         if ok:
             self.events_sent += 1
             self.increment("events_sent")
         return ok
+
+    def platform_event(
+        self,
+        event_type,
+        title=None,
+        message=None,
+        level="info",
+        subject_id=None,
+        subject_type=None,
+        correlation_id=None,
+        tags=None,
+        data=None,
+        **metadata,
+    ):
+        """Publish a typed Titan Platform Event."""
+        return self.event(
+            title=title or event_type,
+            message=message or title or event_type,
+            level=level,
+            data=data or {},
+            event_type=event_type,
+            subject_id=subject_id,
+            subject_type=subject_type,
+            correlation_id=correlation_id,
+            tags=tags or [],
+            platform_event=True,
+            **metadata,
+        )
+
+    def publish_event(self, *args, **kwargs):
+        """Alias for platform_event for service code readability."""
+        return self.platform_event(*args, **kwargs)
 
     def metric(self, name, value):
         self.set_gauge(name, value)
