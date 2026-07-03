@@ -120,3 +120,24 @@ TITAN_DEPLOYMENT=Miget
 ## Version
 
 Current release: `v1.4.0 — Lifecycle Intelligence Framework`
+
+
+## Titan SDK v1.5.0 Platform Events
+
+Titan SDK v1.5.0 keeps the existing `titan.event(...)` API backward-compatible and adds typed platform event metadata for cross-service coordination.
+
+```python
+titan.platform_event(
+    event_type="member.hiatus.started",
+    title="Hiatus Started",
+    message="Member entered hiatus.",
+    level="info",
+    subject_id=member_id,
+    subject_type="discord_member",
+    correlation_id="HIA-000123",
+    tags=["member", "hiatus"],
+    data={"hiatus_id": 123},
+)
+```
+
+Existing calls like `titan.event(title="Job Completed", message="...")` continue to work unchanged.
