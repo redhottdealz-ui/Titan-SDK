@@ -141,3 +141,8 @@ titan.platform_event(
 ```
 
 Existing calls like `titan.event(title="Job Completed", message="...")` continue to work unchanged.
+
+
+## Titan SDK v1.5.2 — Unified API Routing
+
+The SDK includes canonical API route constants in `titan_sdk.api_routes` so services do not hardcode Titan Control Center endpoints. Use `join_url(TITAN_OS_URL, PERSONALITY_REGISTRY_STATUS)` for registry status reporting and the exported constants for service registration, heartbeat, status, events, and metrics.
