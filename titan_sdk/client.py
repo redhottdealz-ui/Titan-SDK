@@ -24,6 +24,7 @@ from .operations import OperationRegistry, default_operations
 from .retry import RetryQueue
 from .runtime import get_hostname, runtime_identity, uptime_seconds, utc_now_iso
 from .version import SDK_VERSION
+from .heartbeat import HEARTBEAT_PROTOCOL, build_unified_heartbeat, component_status
 
 
 @dataclass
@@ -360,6 +361,8 @@ class TitanClient:
         }
         self.gauges: Dict[str, Any] = {}
         self.timers: Dict[str, Dict[str, Any]] = {}
+        self.heartbeat_components: Dict[str, Dict[str, Any]] = {}
+        self.heartbeat_compatibility: Dict[str, Any] = {}
 
     def _normalize_capabilities(self, capabilities):
         defaults = [
@@ -477,6 +480,86 @@ class TitanClient:
             {"label": "Heartbeats", "value": self.heartbeats_sent},
             {"label": "Queue", "value": self.queue_size()},
         ]
+
+
+    def set_heartbeat_component(self, name, status="unknown", message="", **fields):
+        """Set a named unified heartbeat component.
+
+        Components are included in every future heartbeat/status payload.
+        This lets services report subsystem health such as registry, database,
+        scheduler, cache, AI provider, or queue state using one shared schema.
+        """
+        if not name:
+            return {}
+        payload = component_status(status=status, message=message, **fields)
+        self.heartbeat_components[str(name)] = payload
+        return payload
+
+    def clear_heartbeat_component(self, name):
+        self.heartbeat_components.pop(str(name), None)
+        return dict(self.heartbeat_components)
+
+    def set_heartbeat_compatibility(self, **fields):
+        self.heartbeat_compatibility.update({key: value for key, value in fields.items() if value is not None})
+        return dict(self.heartbeat_compatibility)
+
+    def unified_heartbeat_payload(self, status=None, current_state=None, components=None, metrics=None, compatibility=None, diagnostics=None, last_error=None):
+        merged_components = dict(self.heartbeat_components)
+        if components:
+            merged_components.update(components)
+        merged_compatibility = dict(self.heartbeat_compatibility)
+        if compatibility:
+            merged_compatibility.update(compatibility)
+        merged_metrics = self.metrics_snapshot()
+        if metrics:
+            merged_metrics["application"] = metrics
+        return build_unified_heartbeat(
+            service_key=self.service_key,
+            service_name=self.name,
+            service_version=self.version,
+            status=status or self._last_status or "healthy",
+            current_state=current_state or self._last_state or "Running",
+            components=merged_components,
+            metrics=merged_metrics,
+            compatibility=merged_compatibility,
+            diagnostics=diagnostics or self.diagnostics_registry.collect(self),
+            last_error=last_error if last_error is not None else self._last_error,
+        )
+
+    def unified_heartbeat(self, status=None, current_state=None, components=None, metrics=None, compatibility=None, diagnostics=None, last_error=None):
+        """Publish a Titan SDK Unified Heartbeat.
+
+        This uses the existing /api/heartbeat endpoint, so no new service
+        environment variables or network permissions are required.
+        """
+        payload = {
+            "service_key": self.service_key,
+            "name": self.name,
+            "status": status or self._last_status or "online",
+            "current_state": current_state or self._last_state or "Running",
+            "version": self.version,
+            "last_heartbeat": utc_now_iso(),
+            "last_success": self._last_success,
+            "last_error": last_error if last_error is not None else self._last_error,
+            "last_event_title": self._last_event_title,
+            "last_event_level": self._last_event_level,
+            "heartbeat_protocol": HEARTBEAT_PROTOCOL,
+            "heartbeat": self.unified_heartbeat_payload(
+                status=status,
+                current_state=current_state,
+                components=components,
+                metrics=metrics,
+                compatibility=compatibility,
+                diagnostics=diagnostics,
+                last_error=last_error,
+            ),
+            **self.runtime_payload(),
+        }
+        ok = self._post("/api/heartbeat", payload, allow_queue=False)
+        if ok:
+            self.heartbeats_sent += 1
+            self.increment("heartbeats_sent")
+        return ok
 
     def increment(self, name, amount=1):
         with self._metrics_lock:
@@ -777,6 +860,8 @@ class TitanClient:
             "last_error": self._last_error,
             "last_event_title": self._last_event_title,
             "last_event_level": self._last_event_level,
+            "heartbeat_protocol": HEARTBEAT_PROTOCOL,
+            "heartbeat": self.unified_heartbeat_payload(status=status, current_state=current_state),
             **self.runtime_payload(),
         }
         ok = self._post("/api/heartbeat", payload, allow_queue=False)
