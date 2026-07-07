@@ -25,6 +25,7 @@ from .retry import RetryQueue
 from .runtime import get_hostname, runtime_identity, uptime_seconds, utc_now_iso
 from .version import SDK_VERSION
 from .heartbeat import HEARTBEAT_PROTOCOL, build_unified_heartbeat, component_status
+from .api_routes import REGISTER_SERVICE, STATUS, HEARTBEAT, EVENT, EVENTS, METRICS
 
 
 @dataclass
@@ -555,7 +556,7 @@ class TitanClient:
             ),
             **self.runtime_payload(),
         }
-        ok = self._post("/api/heartbeat", payload, allow_queue=False)
+        ok = self._post(HEARTBEAT, payload, allow_queue=False)
         if ok:
             self.heartbeats_sent += 1
             self.increment("heartbeats_sent")
@@ -835,7 +836,7 @@ class TitanClient:
             "registered_at": utc_now_iso(),
             **self.runtime_payload(),
         }
-        ok = self._post("/api/register-service", payload)
+        ok = self._post(REGISTER_SERVICE, payload)
         if ok:
             self.logger.info("Registered service: %s", self.service_key)
         else:
@@ -864,7 +865,7 @@ class TitanClient:
             "heartbeat": self.unified_heartbeat_payload(status=status, current_state=current_state),
             **self.runtime_payload(),
         }
-        ok = self._post("/api/heartbeat", payload, allow_queue=False)
+        ok = self._post(HEARTBEAT, payload, allow_queue=False)
         if ok:
             self.heartbeats_sent += 1
             self.increment("heartbeats_sent")
@@ -906,7 +907,7 @@ class TitanClient:
             "metrics": merged_metrics,
             **self.runtime_payload(),
         }
-        ok = self._post("/api/status", payload)
+        ok = self._post(STATUS, payload)
         if ok:
             self.status_sent += 1
             self.increment("status_sent")
@@ -984,7 +985,7 @@ class TitanClient:
             payload.update(clean_platform_payload)
             payload["platform_event"] = True
 
-        ok = self._post("/api/event", payload)
+        ok = self._post(EVENT, payload)
         if ok:
             self.events_sent += 1
             self.increment("events_sent")
@@ -1035,7 +1036,7 @@ class TitanClient:
             "updated_at": utc_now_iso(),
             **self.runtime_payload(),
         }
-        ok = self._post("/api/metrics", payload)
+        ok = self._post(METRICS, payload)
         if ok:
             self.metrics_sent += 1
             self.increment("metrics_sent")

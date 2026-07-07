@@ -2,6 +2,7 @@ from .client import TitanClient, TitanJob
 from .diagnostics import DiagnosticsRegistry, build_diagnostics
 from .operations import OperationRegistry, Operation
 from .version import SDK_VERSION
+from .api_routes import TITAN_API_ROUTES, join_url
 from .heartbeat import HEARTBEAT_PROTOCOL, TitanHeartbeat, build_unified_heartbeat, component_status
 
 __all__ = [
@@ -12,6 +13,8 @@ __all__ = [
     "DiagnosticsRegistry",
     "build_diagnostics",
     "SDK_VERSION",
+    "TITAN_API_ROUTES",
+    "join_url",
     "HEARTBEAT_PROTOCOL",
     "TitanHeartbeat",
     "build_unified_heartbeat",
