@@ -27,6 +27,9 @@ from .version import SDK_VERSION
 from .heartbeat import HEARTBEAT_PROTOCOL, build_unified_heartbeat, component_status
 from .api_routes import REGISTER_SERVICE, STATUS, HEARTBEAT, EVENT, EVENTS, METRICS
 from .capabilities import build_capability_payload, capability_summary, normalize_capabilities
+from .health import reliability_score
+from .reliability import ReliabilityMonitor, ReliabilityEvent
+from .safe_io import safe_exists, safe_read_json, safe_write_json, safe_mkdir, safe_touch
 
 
 @dataclass
@@ -272,6 +275,8 @@ class TitanClient:
 
         self.operation_registry = OperationRegistry()
         self.diagnostics_registry = DiagnosticsRegistry()
+        self.reliability_monitor = ReliabilityMonitor(client=self)
+        self.command_telemetry_events = []
 
         if include_default_operations:
             for operation in default_operations():
@@ -435,9 +440,30 @@ class TitanClient:
             return self._queue.size()
 
     def diagnostics(self):
-        diagnostics = build_diagnostics(self)
-        diagnostics.update(self.diagnostics_registry.collect(self))
-        diagnostics.update(self.system_payload())
+        """Collect diagnostics without allowing any provider failure to crash callers.
+
+        This method is intentionally fault-tolerant because heartbeat threads,
+        status payloads, and monitoring dashboards call it frequently. A single
+        permission error, bad file path, or third-party diagnostic failure should
+        be reported as diagnostic metadata rather than taking down the service.
+        """
+        diagnostics = {}
+        try:
+            diagnostics.update(build_diagnostics(self))
+        except Exception as error:
+            diagnostics["build_diagnostics_error"] = str(error)
+        try:
+            diagnostics.update(self.diagnostics_registry.collect(self))
+        except Exception as error:
+            diagnostics["diagnostics_registry_error"] = str(error)
+        try:
+            diagnostics.update(self.system_payload())
+        except Exception as error:
+            diagnostics["system_payload_error"] = str(error)
+        try:
+            diagnostics["reliability"] = self.reliability_snapshot()
+        except Exception as error:
+            diagnostics["reliability_error"] = str(error)
         return diagnostics
 
     def system_payload(self):
@@ -474,6 +500,68 @@ class TitanClient:
             {"label": "Queue", "value": self.queue_size()},
         ]
 
+
+    def record_reliability_event(self, event):
+        if not isinstance(event, ReliabilityEvent):
+            try:
+                event = ReliabilityEvent(name=str(getattr(event, "name", "event")), status=str(getattr(event, "status", "unknown")))
+            except Exception:
+                return {}
+        recorded = self.reliability_monitor.record(event)
+        if event.status != "success":
+            self.increment("reliability_failures")
+            self._last_error = event.error or self._last_error
+        else:
+            self.increment("reliability_successes")
+        return recorded
+
+    def record_command_telemetry(self, telemetry):
+        payload = telemetry.to_dict() if hasattr(telemetry, "to_dict") else dict(telemetry or {})
+        self.command_telemetry_events.append(payload)
+        self.command_telemetry_events = self.command_telemetry_events[-100:]
+        self.increment("commands_executed")
+        if payload.get("status") != "success":
+            self.increment("command_failures")
+            self._last_error = payload.get("error") or self._last_error
+        else:
+            self.increment("command_successes")
+        return payload
+
+    def command_health_snapshot(self):
+        total = int(self.counters.get("commands_executed", 0) or 0)
+        failures = int(self.counters.get("command_failures", 0) or 0)
+        successes = int(self.counters.get("command_successes", 0) or 0)
+        success_rate = round((successes / total) * 100, 2) if total else 100.0
+        return {
+            "commands_executed": total,
+            "command_successes": successes,
+            "command_failures": failures,
+            "success_rate": success_rate,
+            "recent_commands": list(self.command_telemetry_events[-10:]),
+        }
+
+    def reliability_snapshot(self):
+        reliability = self.reliability_monitor.snapshot()
+        command_health = self.command_health_snapshot()
+        reliability["commands"] = command_health
+        reliability["score"] = reliability_score(
+            heartbeats_sent=self.heartbeats_sent,
+            failed_posts=self.failed_posts,
+            successful_posts=self.successful_posts,
+            command_failures=command_health.get("command_failures", 0),
+            command_total=command_health.get("commands_executed", 0),
+            reliability_failures=reliability.get("failures", 0),
+            reliability_successes=reliability.get("successes", 0),
+        )
+        return reliability
+
+    # Safe IO helpers exposed through the client for services that want to
+    # avoid filesystem diagnostics taking down heartbeats or schedulers.
+    safe_exists = staticmethod(safe_exists)
+    safe_read_json = staticmethod(safe_read_json)
+    safe_write_json = staticmethod(safe_write_json)
+    safe_mkdir = staticmethod(safe_mkdir)
+    safe_touch = staticmethod(safe_touch)
 
     def set_heartbeat_component(self, name, status="unknown", message="", **fields):
         """Set a named unified heartbeat component.
@@ -528,7 +616,7 @@ class TitanClient:
             components=merged_components,
             metrics=merged_metrics,
             compatibility=merged_compatibility,
-            diagnostics=diagnostics or self.diagnostics_registry.collect(self),
+            diagnostics=diagnostics or self.diagnostics(),
             last_error=last_error if last_error is not None else self._last_error,
         )
 
@@ -705,6 +793,7 @@ class TitanClient:
             "capabilities": self.capabilities,
             "runtime_metrics": self.metrics_snapshot(),
             "diagnostics": self.diagnostics(),
+            "reliability": self.reliability_snapshot(),
             **self.health_payload(),
         }
 
@@ -732,6 +821,12 @@ class TitanClient:
 
     def _handle_callback_error(self, callback_name, error):
         self.increment("errors")
+        try:
+            event = ReliabilityEvent(name=str(callback_name), status="error")
+            event.finish("error", error)
+            self.record_reliability_event(event)
+        except Exception:
+            pass
         self.logger.error("%s callback failed: %s", callback_name, error)
         if self.on_error:
             try:
@@ -820,7 +915,10 @@ class TitanClient:
 
     def _queue_loop(self):
         while self._running:
-            self._flush_queue_once()
+            try:
+                self._flush_queue_once()
+            except Exception as error:
+                self._handle_callback_error("queue_loop", error)
             time.sleep(DEFAULT_QUEUE_FLUSH_INTERVAL)
 
     def register_service(self):
@@ -856,27 +954,63 @@ class TitanClient:
                 self.on_heartbeat(self)
             except Exception as error:
                 self._handle_callback_error("on_heartbeat", error)
-        status = status or self._last_status or "online"
-        current_state = current_state or self._last_state or "Running"
-        payload = {
-            "service_key": self.service_key,
-            "status": status,
-            "current_state": current_state,
-            "version": self.version,
-            "last_heartbeat": utc_now_iso(),
-            "last_success": self._last_success,
-            "last_error": self._last_error,
-            "last_event_title": self._last_event_title,
-            "last_event_level": self._last_event_level,
-            "heartbeat_protocol": HEARTBEAT_PROTOCOL,
-            "heartbeat": self.unified_heartbeat_payload(status=status, current_state=current_state),
-            **self.runtime_payload(),
-        }
+        try:
+            payload = {
+                "service_key": self.service_key,
+                "name": self.name,
+                "status": status or self._last_status or "online",
+                "current_state": current_state or self._last_state or "Running",
+                "version": self.version,
+                "last_heartbeat": utc_now_iso(),
+                "last_success": self._last_success,
+                "last_error": self._last_error,
+                "last_event_title": self._last_event_title,
+                "last_event_level": self._last_event_level,
+                "heartbeat_protocol": HEARTBEAT_PROTOCOL,
+                "heartbeat": self.unified_heartbeat_payload(status=status, current_state=current_state),
+                **self.runtime_payload(),
+            }
+        except Exception as error:
+            self._handle_callback_error("heartbeat_payload", error)
+            payload = {
+                "service_key": self.service_key,
+                "name": self.name,
+                "status": "warning",
+                "current_state": current_state or self._last_state or "Running",
+                "version": self.version,
+                "last_heartbeat": utc_now_iso(),
+                "last_success": self._last_success,
+                "last_error": f"Heartbeat diagnostics unavailable: {error}",
+                "last_event_title": "Heartbeat Diagnostics Warning",
+                "last_event_level": "warning",
+                "heartbeat_protocol": HEARTBEAT_PROTOCOL,
+                "diagnostics_error": str(error),
+                **self.runtime_payload_minimal(),
+            }
         ok = self._post(HEARTBEAT, payload, allow_queue=False)
         if ok:
             self.heartbeats_sent += 1
             self.increment("heartbeats_sent")
         return ok
+
+    def runtime_payload_minimal(self):
+        return {
+            "hostname": self.hostname,
+            "started_at": self.started_at,
+            "process_started_at_epoch": self.process_started_at_epoch,
+            "sdk_name": self.sdk_name,
+            "sdk_version": self.sdk_version,
+            "application_version": self.version,
+            "service_type": self.service_type,
+            "environment": self.environment,
+            "uptime_seconds": self.uptime_seconds(),
+            "queue_size": self.queue_size(),
+            "successful_posts": self.successful_posts,
+            "failed_posts": self.failed_posts,
+            "heartbeats_sent": self.heartbeats_sent,
+            "health_status": "warning",
+            "health_message": "Runtime diagnostics degraded; minimal heartbeat payload used.",
+        }
 
     def status(
         self,
@@ -1065,7 +1199,12 @@ class TitanClient:
 
     def _heartbeat_loop(self):
         while self._running:
-            self.heartbeat(status="online", current_state=self._last_state or "Running")
+            try:
+                self.heartbeat(status="online", current_state=self._last_state or "Running")
+            except Exception as error:
+                # Heartbeat threads must never die because a diagnostics provider,
+                # logger, network request, or callback failed. Record and continue.
+                self._handle_callback_error("heartbeat_loop", error)
             time.sleep(self.heartbeat_interval)
 
     def start(self, current_state="Running", publish_event=True):
