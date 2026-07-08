@@ -178,3 +178,37 @@ The SDK publishes:
 - heartbeat component metadata
 
 No additional environment variables are required.
+
+
+## Titan SDK v1.6.1 — Reliability Framework
+
+Titan SDK v1.6.1 adds fault-tolerant service reliability helpers:
+
+- heartbeat loops that continue after diagnostics failures
+- safe diagnostics collection
+- safe filesystem helpers for persistent storage checks
+- command execution telemetry
+- `@safe_slash_command` for Discord slash command reliability
+- reliability scoring and snapshots in diagnostics payloads
+
+Example:
+
+```python
+from titan_sdk import TitanClient, safe_slash_command
+
+titan = TitanClient(service_key="my_bot", name="My Bot")
+
+@safe_slash_command(client=titan, name="my_command", timeout_seconds=25)
+async def my_command(interaction):
+    await interaction.response.send_message("Done")
+```
+
+Safe file helpers return structured results instead of raising exceptions:
+
+```python
+from titan_sdk import safe_exists, safe_read_json
+
+result = safe_exists("/data/service/history.json")
+if not result.ok:
+    print(result.error)
+```
