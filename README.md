@@ -146,3 +146,35 @@ Existing calls like `titan.event(title="Job Completed", message="...")` continue
 ## Titan SDK v1.5.2 — Unified API Routing
 
 The SDK includes canonical API route constants in `titan_sdk.api_routes` so services do not hardcode Titan Control Center endpoints. Use `join_url(TITAN_OS_URL, PERSONALITY_REGISTRY_STATUS)` for registry status reporting and the exported constants for service registration, heartbeat, status, events, and metrics.
+
+
+## Titan SDK v1.6.0 — Capability Registry
+
+Titan SDK v1.6.0 adds the Unified Capability Registry. Services can continue passing simple capability keys to `TitanClient(capabilities=[...])`; the SDK now enriches those keys into a shared metadata payload used by Titan Control Center.
+
+Example:
+
+```python
+titan = TitanClient(
+    service_key="battle_bot",
+    name="Titan Battle Bot",
+    version="1.4.0",
+    capabilities=[
+        "discord",
+        "battle_scheduler",
+        "draws",
+        "voice_automation",
+        "heartbeats",
+    ],
+)
+```
+
+The SDK publishes:
+- capability keys
+- display labels
+- categories
+- schema version
+- capability counts
+- heartbeat component metadata
+
+No additional environment variables are required.
