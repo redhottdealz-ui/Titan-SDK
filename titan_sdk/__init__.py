@@ -1,22 +1,22 @@
 from .client import TitanClient, TitanJob
-from .diagnostics import DiagnosticsRegistry, build_diagnostics
-from .operations import OperationRegistry, Operation
 from .version import SDK_VERSION
-from .api_routes import TITAN_API_ROUTES, join_url
-from .heartbeat import HEARTBEAT_PROTOCOL, TitanHeartbeat, build_unified_heartbeat, component_status
+from .capabilities import (
+    CAPABILITY_SCHEMA_VERSION,
+    CAPABILITY_REGISTRY,
+    DEFAULT_CAPABILITIES,
+    build_capability_payload,
+    capability_summary,
+    normalize_capabilities,
+)
 
 __all__ = [
     "TitanClient",
     "TitanJob",
-    "OperationRegistry",
-    "Operation",
-    "DiagnosticsRegistry",
-    "build_diagnostics",
     "SDK_VERSION",
-    "TITAN_API_ROUTES",
-    "join_url",
-    "HEARTBEAT_PROTOCOL",
-    "TitanHeartbeat",
-    "build_unified_heartbeat",
-    "component_status",
+    "CAPABILITY_SCHEMA_VERSION",
+    "CAPABILITY_REGISTRY",
+    "DEFAULT_CAPABILITIES",
+    "build_capability_payload",
+    "capability_summary",
+    "normalize_capabilities",
 ]

@@ -26,6 +26,7 @@ from .runtime import get_hostname, runtime_identity, uptime_seconds, utc_now_iso
 from .version import SDK_VERSION
 from .heartbeat import HEARTBEAT_PROTOCOL, build_unified_heartbeat, component_status
 from .api_routes import REGISTER_SERVICE, STATUS, HEARTBEAT, EVENT, EVENTS, METRICS
+from .capabilities import build_capability_payload, capability_summary, normalize_capabilities
 
 
 @dataclass
@@ -366,22 +367,13 @@ class TitanClient:
         self.heartbeat_compatibility: Dict[str, Any] = {}
 
     def _normalize_capabilities(self, capabilities):
-        defaults = [
-            "registration",
-            "heartbeat",
-            "status",
-            "metrics",
-            "events",
-            "diagnostics",
-            "operations",
-            "lifecycle",
-            "jobs",
-        ]
-        combined = []
-        for item in defaults + list(capabilities or []):
-            if item and item not in combined:
-                combined.append(item)
-        return combined
+        return normalize_capabilities(capabilities, include_defaults=True)
+
+    def capability_payload(self):
+        return build_capability_payload(self.capabilities, include_defaults=False)
+
+    def capability_summary(self):
+        return capability_summary(self.capabilities, include_defaults=False)
 
     def add_capability(self, capability):
         if capability and capability not in self.capabilities:
@@ -506,12 +498,25 @@ class TitanClient:
 
     def unified_heartbeat_payload(self, status=None, current_state=None, components=None, metrics=None, compatibility=None, diagnostics=None, last_error=None):
         merged_components = dict(self.heartbeat_components)
+        merged_components.setdefault(
+            "capabilities",
+            component_status(
+                status="healthy",
+                message="Service capability registry is available.",
+                capability_schema_version=self.capability_summary().get("schema_version"),
+                capability_count=self.capability_summary().get("count"),
+                capabilities=self.capability_summary().get("keys"),
+                categories=self.capability_summary().get("categories"),
+            ),
+        )
         if components:
             merged_components.update(components)
         merged_compatibility = dict(self.heartbeat_compatibility)
         if compatibility:
             merged_compatibility.update(compatibility)
         merged_metrics = self.metrics_snapshot()
+        merged_metrics.setdefault("capability_registry", self.capability_payload())
+        merged_metrics.setdefault("capability_summary", self.capability_summary())
         if metrics:
             merged_metrics["application"] = metrics
         return build_unified_heartbeat(
@@ -832,6 +837,8 @@ class TitanClient:
             "deployment": self.deployment,
             "dependencies": self.dependencies,
             "capabilities": self.capabilities,
+            "capability_registry": self.capability_payload(),
+            "capability_summary": self.capability_summary(),
             "operations": self.operations(),
             "registered_at": utc_now_iso(),
             **self.runtime_payload(),
@@ -889,6 +896,8 @@ class TitanClient:
         self._last_event_level = last_event_level or self._last_event_level
 
         merged_metrics = self.metrics_snapshot()
+        merged_metrics.setdefault("capability_registry", self.capability_payload())
+        merged_metrics.setdefault("capability_summary", self.capability_summary())
         if metrics:
             merged_metrics["application"] = metrics
 
