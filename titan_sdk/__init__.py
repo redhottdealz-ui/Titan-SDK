@@ -1,3 +1,4 @@
+from .configuration import ConfigurationClient, ConfigurationSnapshot, ConfigurationApplyResult, hot_reload_registry
 from .client import TitanClient, TitanJob
 from .version import SDK_VERSION
 from .capabilities import (
@@ -31,6 +32,10 @@ __all__ = [
     "safe_write_json",
     "safe_mkdir",
     "safe_touch",
+    "hot_reload_registry",
+    "ConfigurationApplyResult",
+    "ConfigurationSnapshot",
+    "ConfigurationClient",
 ]
 
 from .command_framework import safe_slash_command
