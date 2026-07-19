@@ -14,6 +14,13 @@ EVENTS = f"{API_PREFIX}/events"
 METRICS = f"{API_PREFIX}/metrics"
 SERVICES = f"{API_PREFIX}/services"
 
+# Secure service-to-service probation handoff routes.
+PROBATION_REQUESTS = f"{API_PREFIX}/internal/probation/requests"
+PROBATION_REQUESTS_PENDING = f"{PROBATION_REQUESTS}/pending"
+
+def probation_request_ack(request_id: str) -> str:
+    return f"{PROBATION_REQUESTS}/{str(request_id).strip()}/ack"
+
 # Titan AI personality registry routes.
 # Canonical public API routes include /api. Control Center keeps non-/api
 # compatibility aliases during migration.
@@ -40,6 +47,8 @@ TITAN_API_ROUTES = {
     "events": EVENTS,
     "metrics": METRICS,
     "services": SERVICES,
+    "probation_requests": PROBATION_REQUESTS,
+    "probation_requests_pending": PROBATION_REQUESTS_PENDING,
     "personality_registry": PERSONALITY_REGISTRY,
     "personality_registry_version": PERSONALITY_REGISTRY_VERSION,
     "personality_registry_push_sync": PERSONALITY_REGISTRY_PUSH_SYNC,

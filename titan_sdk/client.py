@@ -25,7 +25,7 @@ from .retry import RetryQueue
 from .runtime import get_hostname, runtime_identity, uptime_seconds, utc_now_iso
 from .version import SDK_VERSION
 from .heartbeat import HEARTBEAT_PROTOCOL, build_unified_heartbeat, component_status
-from .api_routes import REGISTER_SERVICE, STATUS, HEARTBEAT, EVENT, EVENTS, METRICS
+from .api_routes import REGISTER_SERVICE, STATUS, HEARTBEAT, EVENT, EVENTS, METRICS, PROBATION_REQUESTS, PROBATION_REQUESTS_PENDING, probation_request_ack
 from .capabilities import build_capability_payload, capability_summary, normalize_capabilities
 from .health import reliability_score
 from .reliability import ReliabilityMonitor, ReliabilityEvent
@@ -812,6 +812,39 @@ class TitanClient:
             "capabilities": self.capabilities,
             "operations_registered": len(self.operations()),
         }
+
+
+    def probation_request(self, *, guild_id, member_id, approved_by, reason, duration_days=14, idempotency_key=None, attendance_dates=None):
+        """Queue an approved probation request through Titan Control Center."""
+        payload = {
+            "source_service": self.service_key,
+            "guild_id": int(guild_id),
+            "member_id": int(member_id),
+            "approved_by": int(approved_by),
+            "reason": str(reason)[:1000],
+            "duration_days": max(1, min(90, int(duration_days))),
+            "idempotency_key": str(idempotency_key or ""),
+            "attendance_dates": list(attendance_dates or [])[:10],
+        }
+        return self._post(PROBATION_REQUESTS, payload, allow_queue=True)
+
+    def probation_pending(self, limit=25):
+        """Return pending probation handoffs for a trusted consumer service."""
+        if not self.is_ready():
+            return []
+        response = requests.get(
+            self._url(f"{PROBATION_REQUESTS_PENDING}?limit={max(1, min(100, int(limit)))}"),
+            headers=self._headers(), timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json().get("requests", [])
+
+    def probation_ack(self, request_id, *, status, result="", probation_id=None):
+        """Acknowledge completion, duplication, rejection, or retry of a handoff."""
+        payload = {"status": str(status), "result": str(result)[:1000]}
+        if probation_id is not None:
+            payload["probation_id"] = int(probation_id)
+        return self._post(probation_request_ack(request_id), payload, allow_queue=False)
 
     def _headers(self):
         return {"Content-Type": "application/json", "X-Titan-API-Key": self.api_key or ""}
