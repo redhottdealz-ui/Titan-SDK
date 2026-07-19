@@ -1,0 +1,14 @@
+Titan SDK v1.8.0 replacement paths
+
+pyproject.toml
+titan_sdk/__init__.py
+titan_sdk/version.py
+titan_sdk/configuration/__init__.py
+titan_sdk/configuration/client.py
+titan_sdk/configuration/models.py
+titan_sdk/configuration/schema.py
+titan_sdk/configuration/sync.py
+titan_sdk/configuration/validation.py
+TITAN_SDK_V1_8_0_CONFIGURATION_MANAGEMENT_2026_07_19.md
+PLACEMENT_INSTRUCTIONS_TITAN_SDK_V1_8_0.txt
+SHA256SUMS_TITAN_SDK_V1_8_0.txt
