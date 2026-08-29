@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from titan_sdk.client import TitanClient
+from titan_sdk.constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY
 from titan_sdk.heartbeat import HEARTBEAT_PROTOCOL
 
 
@@ -65,11 +66,17 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
 
     def test_retry_delay_has_bounded_jitter_to_avoid_fleet_retry_storms(self):
         client = self.client()
-        delays = [client._retry_delay(2) for _ in range(12)]
+        attempts = 2
+        delays = [client._retry_delay(attempts) for _ in range(12)]
 
         self.assertGreater(len(set(delays)), 1, "retry delay must include jitter")
-        deterministic_delay = 2.0
-        self.assertTrue(all(deterministic_delay * 0.8 <= delay <= deterministic_delay * 1.2 for delay in delays))
+        deterministic_delay = min(
+            DEFAULT_RETRY_BASE_DELAY * (2 ** max(0, attempts - 1)),
+            DEFAULT_RETRY_MAX_DELAY,
+        )
+        lower = deterministic_delay * 0.8
+        upper = min(deterministic_delay * 1.2, DEFAULT_RETRY_MAX_DELAY)
+        self.assertTrue(all(lower <= delay <= upper for delay in delays))
 
 
 if __name__ == "__main__":
