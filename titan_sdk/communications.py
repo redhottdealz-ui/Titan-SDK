@@ -101,13 +101,14 @@ class TitanCommunicationsClient(TitanClient):
         """Deliver an explicitly classified Control Center request.
 
         ``ephemeral`` traffic is never queued and is suppressed while an outage is
-        already known. ``important`` traffic is attempted and durably queued on
-        failure. ``probe`` always attempts transport and clears outage state on
-        success.
+        already known. ``reconstructable`` traffic is retried only when its caller
+        explicitly reconstructs current state. ``important`` traffic is attempted
+        and durably queued on failure. ``probe`` always attempts transport and
+        clears outage state on success.
         """
         delivery_class = str(delivery_class or "important").strip().lower()
-        if delivery_class not in {"ephemeral", "important", "probe"}:
-            raise ValueError("delivery_class must be ephemeral, important, or probe")
+        if delivery_class not in {"ephemeral", "reconstructable", "important", "probe"}:
+            raise ValueError("delivery_class must be ephemeral, reconstructable, important, or probe")
 
         if delivery_class == "ephemeral" and self._control_center_outage:
             return False
