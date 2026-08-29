@@ -19,14 +19,19 @@ from .capabilities import build_capability_payload
 from .runtime import utc_now_iso
 
 
+DEFAULT_OUTAGE_REPROBE_INTERVAL = 30.0
+
+
 class TitanCommunicationsClient(TitanClient):
     """Backward-compatible TitanClient with Phase 1A communications improvements."""
 
-    def __init__(self, *args, durable_delivery_path=None, **kwargs):
+    def __init__(self, *args, durable_delivery_path=None, outage_reprobe_interval=DEFAULT_OUTAGE_REPROBE_INTERVAL, **kwargs):
         self._durable_delivery_path = Path(durable_delivery_path) if durable_delivery_path else None
+        self._outage_reprobe_interval = max(0.0, float(outage_reprobe_interval))
         super().__init__(*args, **kwargs)
         self._last_synced_capability_fingerprint = None
         self._control_center_outage = False
+        self._control_center_outage_observed_at = None
         self._restore_durable_deliveries()
 
     def capability_fingerprint(self) -> str:
@@ -53,6 +58,22 @@ class TitanCommunicationsClient(TitanClient):
     def control_center_outage_active(self) -> bool:
         """Return whether the communications client has observed a transport outage."""
         return bool(self._control_center_outage)
+
+    def _mark_control_center_outage(self):
+        self._control_center_outage = True
+        self._control_center_outage_observed_at = time.monotonic()
+
+    def _clear_control_center_outage(self):
+        self._control_center_outage = False
+        self._control_center_outage_observed_at = None
+
+    def _ephemeral_transport_suppressed(self) -> bool:
+        if not self._control_center_outage:
+            return False
+        if self._control_center_outage_observed_at is None:
+            return False
+        elapsed = time.monotonic() - self._control_center_outage_observed_at
+        return elapsed < self._outage_reprobe_interval
 
     def _load_durable_deliveries(self):
         if self._durable_delivery_path is None:
@@ -100,8 +121,9 @@ class TitanCommunicationsClient(TitanClient):
     def deliver(self, path, payload, *, delivery_class="important") -> bool:
         """Deliver an explicitly classified Control Center request.
 
-        ``ephemeral`` traffic is never queued and is suppressed while an outage is
-        already known. ``reconstructable`` traffic is retried only when its caller
+        ``ephemeral`` traffic is never queued and is temporarily suppressed after
+        an observed outage, then one request is allowed to reprobe after the bounded
+        cooldown. ``reconstructable`` traffic is retried only when its caller
         explicitly reconstructs current state. ``important`` traffic is attempted
         and durably queued on failure. ``probe`` always attempts transport and
         clears outage state on success.
@@ -110,7 +132,7 @@ class TitanCommunicationsClient(TitanClient):
         if delivery_class not in {"ephemeral", "reconstructable", "important", "probe"}:
             raise ValueError("delivery_class must be ephemeral, reconstructable, important, or probe")
 
-        if delivery_class == "ephemeral" and self._control_center_outage:
+        if delivery_class == "ephemeral" and self._ephemeral_transport_suppressed():
             return False
 
         if not self.is_ready():
@@ -119,7 +141,7 @@ class TitanCommunicationsClient(TitanClient):
         try:
             sent = bool(self._send_now(path, payload))
         except Exception as error:
-            self._control_center_outage = True
+            self._mark_control_center_outage()
             self.last_failed_post = utc_now_iso()
             self.failed_posts += 1
             self.increment("posts_failed")
@@ -134,7 +156,7 @@ class TitanCommunicationsClient(TitanClient):
             return False
 
         if sent:
-            self._control_center_outage = False
+            self._clear_control_center_outage()
         return sent
 
     def _flush_queue_once(self):
@@ -148,13 +170,13 @@ class TitanCommunicationsClient(TitanClient):
         try:
             self._send_now(item["path"], item["payload"])
             self._remove_durable_delivery(item["path"], item["payload"])
-            self._control_center_outage = False
+            self._clear_control_center_outage()
             self.queue_flushes += 1
             self.increment("queue_flushes")
             self.logger.info("Flushed queued request: %s", item["path"])
             return True
         except Exception as error:
-            self._control_center_outage = True
+            self._mark_control_center_outage()
             self.logger.error("Queue flush failed: %s", error)
             self.last_failed_post = utc_now_iso()
             self.failed_posts += 1
