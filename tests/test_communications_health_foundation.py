@@ -28,10 +28,8 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
             dependency="discord",
             ready=False,
         )
-
         payload = client.unified_heartbeat_payload(diagnostics={})
         component = payload["components"]["discord_gateway"]
-
         self.assertEqual(payload["protocol"], HEARTBEAT_PROTOCOL)
         self.assertEqual(component["status"], "error")
         self.assertEqual(component["message"], "Gateway session unavailable.")
@@ -44,7 +42,6 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         client = self.client()
         with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")):
             self.assertFalse(client.heartbeat(status="healthy", current_state="Running"))
-
         self.assertEqual(client.queue_size(), 0)
         self.assertEqual(client.failed_posts, 1)
 
@@ -52,14 +49,12 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         client = self.client()
         with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")):
             self.assertFalse(client.unified_heartbeat(status="healthy", current_state="Running", diagnostics={}))
-
         self.assertEqual(client.queue_size(), 0)
         self.assertEqual(client.failed_posts, 1)
 
     def test_capability_fingerprint_is_deterministic_and_order_insensitive(self):
         first = self.client(capabilities=["discord", "scheduler"])
         second = self.client(capabilities=["scheduler", "discord"])
-
         self.assertEqual(first.capability_fingerprint(), second.capability_fingerprint())
         self.assertEqual(first.capability_fingerprint(), first.capability_fingerprint())
 
@@ -67,12 +62,8 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         client = self.client()
         attempts = 2
         delays = [client._retry_delay(attempts) for _ in range(12)]
-
         self.assertGreater(len(set(delays)), 1, "retry delay must include jitter")
-        deterministic_delay = min(
-            DEFAULT_RETRY_BASE_DELAY * (2 ** max(0, attempts - 1)),
-            DEFAULT_RETRY_MAX_DELAY,
-        )
+        deterministic_delay = min(DEFAULT_RETRY_BASE_DELAY * (2 ** max(0, attempts - 1)), DEFAULT_RETRY_MAX_DELAY)
         lower = deterministic_delay * 0.8
         upper = min(deterministic_delay * 1.2, DEFAULT_RETRY_MAX_DELAY)
         self.assertTrue(all(lower <= delay <= upper for delay in delays))
@@ -84,7 +75,6 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
             self.assertFalse(client.sync_capabilities_if_changed())
             client.add_capability("scheduler")
             self.assertTrue(client.sync_capabilities_if_changed())
-
         self.assertEqual(register.call_count, 2)
 
     def test_failed_capability_sync_is_not_marked_as_current(self):
@@ -92,8 +82,36 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         with patch("titan_sdk.client.TitanClient.register_service", side_effect=[False, True]) as register:
             self.assertFalse(client.sync_capabilities_if_changed())
             self.assertTrue(client.sync_capabilities_if_changed())
-
         self.assertEqual(register.call_count, 2)
+
+    def test_delivery_classification_keeps_ephemeral_traffic_out_of_retry_queue(self):
+        client = self.client()
+        with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")):
+            self.assertFalse(client.deliver("/api/metrics", {"value": 1}, delivery_class="ephemeral"))
+        self.assertEqual(client.queue_size(), 0)
+
+    def test_important_delivery_remains_retryable_during_control_center_outage(self):
+        client = self.client()
+        with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")):
+            self.assertFalse(client.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+        self.assertEqual(client.queue_size(), 1)
+        self.assertTrue(client.control_center_outage_active())
+
+    def test_outage_suppresses_repeated_ephemeral_transport_attempts(self):
+        client = self.client()
+        with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")) as send:
+            self.assertFalse(client.deliver("/api/metrics", {"value": 1}, delivery_class="ephemeral"))
+            self.assertFalse(client.deliver("/api/metrics", {"value": 2}, delivery_class="ephemeral"))
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(client.queue_size(), 0)
+
+    def test_successful_probe_clears_control_center_outage_state(self):
+        client = self.client()
+        with patch.object(client, "_send_now", side_effect=[RuntimeError("control center unavailable"), True]):
+            self.assertFalse(client.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+            self.assertTrue(client.control_center_outage_active())
+            self.assertTrue(client.deliver("/api/health-probe", {}, delivery_class="probe"))
+        self.assertFalse(client.control_center_outage_active())
 
 
 if __name__ == "__main__":
