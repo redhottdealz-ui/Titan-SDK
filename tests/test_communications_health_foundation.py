@@ -145,6 +145,20 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
                 self.assertTrue(client.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
             self.assertEqual(client.durable_delivery_count(), 0)
 
+    def test_successful_retry_removes_durable_delivery_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            first = self.client(durable_delivery_path=durable_path)
+            with patch.object(first, "_send_now", side_effect=RuntimeError("control center unavailable")):
+                self.assertFalse(first.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+
+            second = self.client(durable_delivery_path=durable_path)
+            self.assertEqual(second.durable_delivery_count(), 1)
+            with patch.object(second, "_send_now", return_value=True):
+                self.assertTrue(second._flush_queue_once())
+            self.assertEqual(second.durable_delivery_count(), 0)
+            self.assertEqual(second.queue_size(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
