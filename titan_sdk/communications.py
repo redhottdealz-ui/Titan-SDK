@@ -165,6 +165,7 @@ class TitanCommunicationsClient(TitanClient):
                     self._queue.push_front(item)
                 time.sleep(self._retry_delay(item["attempts"]))
             else:
+                self._remove_durable_delivery(item["path"], item["payload"])
                 self.queue_drops += 1
                 self.increment("queue_drops")
                 self.logger.error("Dropped queued request after %s attempts: %s", item["attempts"], item["path"])
