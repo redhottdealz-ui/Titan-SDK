@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from titan_sdk.communications import TitanCommunicationsClient
@@ -112,6 +114,36 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
             self.assertTrue(client.control_center_outage_active())
             self.assertTrue(client.deliver("/api/health-probe", {}, delivery_class="probe"))
         self.assertFalse(client.control_center_outage_active())
+
+    def test_important_delivery_survives_client_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            first = self.client(durable_delivery_path=durable_path)
+            with patch.object(first, "_send_now", side_effect=RuntimeError("control center unavailable")):
+                self.assertFalse(first.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+
+            second = self.client(durable_delivery_path=durable_path)
+            self.assertEqual(second.durable_delivery_count(), 1)
+            self.assertEqual(second.queue_size(), 1)
+
+    def test_ephemeral_delivery_is_never_persisted_across_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            first = self.client(durable_delivery_path=durable_path)
+            with patch.object(first, "_send_now", side_effect=RuntimeError("control center unavailable")):
+                self.assertFalse(first.deliver("/api/metrics", {"value": 1}, delivery_class="ephemeral"))
+
+            second = self.client(durable_delivery_path=durable_path)
+            self.assertEqual(second.durable_delivery_count(), 0)
+            self.assertEqual(second.queue_size(), 0)
+
+    def test_successful_important_delivery_is_not_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            client = self.client(durable_delivery_path=durable_path)
+            with patch.object(client, "_send_now", return_value=True):
+                self.assertTrue(client.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+            self.assertEqual(client.durable_delivery_count(), 0)
 
 
 if __name__ == "__main__":
