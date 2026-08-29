@@ -89,21 +89,30 @@ class TitanCommunicationsClient(TitanClient):
     def _save_durable_deliveries(self, rows):
         if self._durable_delivery_path is None:
             return
+        serialized = json.dumps(rows, indent=2, sort_keys=True)
         self._durable_delivery_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._durable_delivery_path.with_suffix(self._durable_delivery_path.suffix + ".tmp")
-        temporary.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, self._durable_delivery_path)
 
     def _restore_durable_deliveries(self):
         for item in self._load_durable_deliveries():
             self._queue_post(item["path"], item.get("payload") or {})
 
-    def _persist_important_delivery(self, path, payload):
+    def _persist_important_delivery(self, path, payload) -> bool:
         if self._durable_delivery_path is None:
-            return
+            return True
         rows = self._load_durable_deliveries()
         rows.append({"path": path, "payload": payload})
-        self._save_durable_deliveries(rows)
+        try:
+            self._save_durable_deliveries(rows)
+        except (TypeError, ValueError, OSError) as error:
+            self.logger.error("Could not persist important delivery: %s", error)
+            return False
+        return True
 
     def _remove_durable_delivery(self, path, payload):
         if self._durable_delivery_path is None:
@@ -145,8 +154,7 @@ class TitanCommunicationsClient(TitanClient):
             self.last_failed_post = utc_now_iso()
             self.failed_posts += 1
             self.increment("posts_failed")
-            if delivery_class == "important":
-                self._persist_important_delivery(path, payload)
+            if delivery_class == "important" and self._persist_important_delivery(path, payload):
                 self._queue_post(path, payload)
             if self.on_error:
                 try:
