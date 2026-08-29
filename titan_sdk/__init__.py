@@ -1,5 +1,6 @@
 from .configuration import ConfigurationClient, ConfigurationSnapshot, ConfigurationApplyResult, hot_reload_registry
 from .client import TitanClient, TitanJob
+from .communications import TitanCommunicationsClient
 from .version import SDK_VERSION
 from .capabilities import (
     CAPABILITY_SCHEMA_VERSION,
@@ -13,6 +14,7 @@ from .capabilities import (
 __all__ = [
     "TitanClient",
     "TitanJob",
+    "TitanCommunicationsClient",
     "SDK_VERSION",
     "CAPABILITY_SCHEMA_VERSION",
     "CAPABILITY_REGISTRY",
