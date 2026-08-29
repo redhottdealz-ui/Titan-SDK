@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from titan_sdk.client import TitanClient
+from titan_sdk.communications import TitanCommunicationsClient
 from titan_sdk.constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY
 from titan_sdk.heartbeat import HEARTBEAT_PROTOCOL
 
@@ -16,7 +16,7 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
             "api_key": "test-key",
         }
         defaults.update(kwargs)
-        return TitanClient(**defaults)
+        return TitanCommunicationsClient(**defaults)
 
     def test_component_health_contract_is_backward_compatible_and_preserves_metadata(self):
         client = self.client(capabilities=["discord"])
@@ -60,7 +60,6 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         first = self.client(capabilities=["discord", "scheduler"])
         second = self.client(capabilities=["scheduler", "discord"])
 
-        self.assertTrue(hasattr(first, "capability_fingerprint"))
         self.assertEqual(first.capability_fingerprint(), second.capability_fingerprint())
         self.assertEqual(first.capability_fingerprint(), first.capability_fingerprint())
 
