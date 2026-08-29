@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
+from pathlib import Path
 
 from .client import TitanClient
 from .constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY
@@ -18,10 +20,12 @@ from .capabilities import build_capability_payload
 class TitanCommunicationsClient(TitanClient):
     """Backward-compatible TitanClient with Phase 1A communications improvements."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, durable_delivery_path=None, **kwargs):
+        self._durable_delivery_path = Path(durable_delivery_path) if durable_delivery_path else None
         super().__init__(*args, **kwargs)
         self._last_synced_capability_fingerprint = None
         self._control_center_outage = False
+        self._restore_durable_deliveries()
 
     def capability_fingerprint(self) -> str:
         """Return a deterministic, order-insensitive capability fingerprint."""
@@ -48,12 +52,46 @@ class TitanCommunicationsClient(TitanClient):
         """Return whether the communications client has observed a transport outage."""
         return bool(self._control_center_outage)
 
+    def _load_durable_deliveries(self):
+        if self._durable_delivery_path is None:
+            return []
+        try:
+            value = json.loads(self._durable_delivery_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict) and item.get("path")]
+
+    def _save_durable_deliveries(self, rows):
+        if self._durable_delivery_path is None:
+            return
+        self._durable_delivery_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._durable_delivery_path.with_suffix(self._durable_delivery_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, self._durable_delivery_path)
+
+    def _restore_durable_deliveries(self):
+        for item in self._load_durable_deliveries():
+            self._queue_post(item["path"], item.get("payload") or {})
+
+    def _persist_important_delivery(self, path, payload):
+        if self._durable_delivery_path is None:
+            return
+        rows = self._load_durable_deliveries()
+        rows.append({"path": path, "payload": payload})
+        self._save_durable_deliveries(rows)
+
+    def durable_delivery_count(self) -> int:
+        return len(self._load_durable_deliveries())
+
     def deliver(self, path, payload, *, delivery_class="important") -> bool:
         """Deliver an explicitly classified Control Center request.
 
         ``ephemeral`` traffic is never queued and is suppressed while an outage is
-        already known. ``important`` traffic is attempted and queued on failure.
-        ``probe`` always attempts transport and clears outage state on success.
+        already known. ``important`` traffic is attempted and durably queued on
+        failure. ``probe`` always attempts transport and clears outage state on
+        success.
         """
         delivery_class = str(delivery_class or "important").strip().lower()
         if delivery_class not in {"ephemeral", "important", "probe"}:
@@ -73,6 +111,7 @@ class TitanCommunicationsClient(TitanClient):
             self.failed_posts += 1
             self.increment("posts_failed")
             if delivery_class == "important":
+                self._persist_important_delivery(path, payload)
                 self._queue_post(path, payload)
             if self.on_error:
                 try:
