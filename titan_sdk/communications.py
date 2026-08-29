@@ -18,11 +18,30 @@ from .capabilities import build_capability_payload
 class TitanCommunicationsClient(TitanClient):
     """Backward-compatible TitanClient with Phase 1A communications improvements."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_synced_capability_fingerprint = None
+
     def capability_fingerprint(self) -> str:
         """Return a deterministic, order-insensitive capability fingerprint."""
         payload = build_capability_payload(sorted(self.capabilities), include_defaults=False)
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def sync_capabilities_if_changed(self) -> bool:
+        """Publish capability registration only when effective capability state changed.
+
+        A failed registration never advances the local synchronization marker, so
+        the next call retries the same capability contract instead of suppressing it.
+        """
+        fingerprint = self.capability_fingerprint()
+        if fingerprint == self._last_synced_capability_fingerprint:
+            return False
+
+        synced = bool(super().register_service())
+        if synced:
+            self._last_synced_capability_fingerprint = fingerprint
+        return synced
 
     def _retry_delay(self, attempts):
         """Preserve exponential backoff while adding bounded fleet-safe jitter."""
