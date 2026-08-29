@@ -10,11 +10,13 @@ import hashlib
 import json
 import os
 import random
+import time
 from pathlib import Path
 
 from .client import TitanClient
-from .constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY
+from .constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_ATTEMPTS, DEFAULT_RETRY_MAX_DELAY
 from .capabilities import build_capability_payload
+from .runtime import utc_now_iso
 
 
 class TitanCommunicationsClient(TitanClient):
@@ -117,7 +119,7 @@ class TitanCommunicationsClient(TitanClient):
             sent = bool(self._send_now(path, payload))
         except Exception as error:
             self._control_center_outage = True
-            self.last_failed_post = self.started_at
+            self.last_failed_post = utc_now_iso()
             self.failed_posts += 1
             self.increment("posts_failed")
             if delivery_class == "important":
@@ -153,19 +155,19 @@ class TitanCommunicationsClient(TitanClient):
         except Exception as error:
             self._control_center_outage = True
             self.logger.error("Queue flush failed: %s", error)
-            self.last_failed_post = self.started_at
+            self.last_failed_post = utc_now_iso()
             self.failed_posts += 1
             self.queue_retries += 1
             self.increment("posts_failed")
             self.increment("queue_retries")
-            if item["attempts"] < 10:
+            if item["attempts"] < DEFAULT_RETRY_MAX_ATTEMPTS:
                 with self._queue_lock:
                     self._queue.push_front(item)
-            if self.on_error:
-                try:
-                    self.on_error(self, error)
-                except Exception as callback_error:
-                    self.logger.error("on_error callback failed: %s", callback_error)
+                time.sleep(self._retry_delay(item["attempts"]))
+            else:
+                self.queue_drops += 1
+                self.increment("queue_drops")
+                self.logger.error("Dropped queued request after %s attempts: %s", item["attempts"], item["path"])
             return False
 
     def _retry_delay(self, attempts):
