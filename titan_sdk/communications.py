@@ -21,6 +21,7 @@ class TitanCommunicationsClient(TitanClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._last_synced_capability_fingerprint = None
+        self._control_center_outage = False
 
     def capability_fingerprint(self) -> str:
         """Return a deterministic, order-insensitive capability fingerprint."""
@@ -42,6 +43,47 @@ class TitanCommunicationsClient(TitanClient):
         if synced:
             self._last_synced_capability_fingerprint = fingerprint
         return synced
+
+    def control_center_outage_active(self) -> bool:
+        """Return whether the communications client has observed a transport outage."""
+        return bool(self._control_center_outage)
+
+    def deliver(self, path, payload, *, delivery_class="important") -> bool:
+        """Deliver an explicitly classified Control Center request.
+
+        ``ephemeral`` traffic is never queued and is suppressed while an outage is
+        already known. ``important`` traffic is attempted and queued on failure.
+        ``probe`` always attempts transport and clears outage state on success.
+        """
+        delivery_class = str(delivery_class or "important").strip().lower()
+        if delivery_class not in {"ephemeral", "important", "probe"}:
+            raise ValueError("delivery_class must be ephemeral, important, or probe")
+
+        if delivery_class == "ephemeral" and self._control_center_outage:
+            return False
+
+        if not self.is_ready():
+            return False
+
+        try:
+            sent = bool(self._send_now(path, payload))
+        except Exception as error:
+            self._control_center_outage = True
+            self.last_failed_post = self.started_at
+            self.failed_posts += 1
+            self.increment("posts_failed")
+            if delivery_class == "important":
+                self._queue_post(path, payload)
+            if self.on_error:
+                try:
+                    self.on_error(self, error)
+                except Exception as callback_error:
+                    self.logger.error("on_error callback failed: %s", callback_error)
+            return False
+
+        if sent:
+            self._control_center_outage = False
+        return sent
 
     def _retry_delay(self, attempts):
         """Preserve exponential backoff while adding bounded fleet-safe jitter."""
