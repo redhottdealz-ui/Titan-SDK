@@ -1,8 +1,5 @@
-import hashlib
-import json
 import os
 import platform
-import random
 import sys
 import time
 import threading
@@ -198,7 +195,7 @@ class TitanJob:
             failure_metrics.update(metrics)
 
         self.client.merge_metrics(failure_metrics)
-        self.last_failed_job = {
+        self.client.last_failed_job = {
             "name": self.name,
             "message": message or error_text,
             "error": error_text,
@@ -383,12 +380,6 @@ class TitanClient:
     def capability_summary(self):
         return capability_summary(self.capabilities, include_defaults=False)
 
-    def capability_fingerprint(self):
-        """Return a stable fingerprint for the effective capability contract."""
-        payload = self.capability_payload()
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
     def add_capability(self, capability):
         if capability and capability not in self.capabilities:
             self.capabilities.append(capability)
@@ -449,6 +440,13 @@ class TitanClient:
             return self._queue.size()
 
     def diagnostics(self):
+        """Collect diagnostics without allowing any provider failure to crash callers.
+
+        This method is intentionally fault-tolerant because heartbeat threads,
+        status payloads, and monitoring dashboards call it frequently. A single
+        permission error, bad file path, or third-party diagnostic failure should
+        be reported as diagnostic metadata rather than taking down the service.
+        """
         diagnostics = {}
         try:
             diagnostics.update(build_diagnostics(self))
@@ -501,6 +499,7 @@ class TitanClient:
             {"label": "Heartbeats", "value": self.heartbeats_sent},
             {"label": "Queue", "value": self.queue_size()},
         ]
+
 
     def record_reliability_event(self, event):
         if not isinstance(event, ReliabilityEvent):
@@ -556,6 +555,8 @@ class TitanClient:
         )
         return reliability
 
+    # Safe IO helpers exposed through the client for services that want to
+    # avoid filesystem diagnostics taking down heartbeats or schedulers.
     safe_exists = staticmethod(safe_exists)
     safe_read_json = staticmethod(safe_read_json)
     safe_write_json = staticmethod(safe_write_json)
@@ -563,134 +564,68 @@ class TitanClient:
     safe_touch = staticmethod(safe_touch)
 
     def set_heartbeat_component(self, name, status="unknown", message="", **fields):
-        component = component_status(status, message, **fields)
-        self.heartbeat_components[str(name)] = component
-        return dict(component)
+        """Set a named unified heartbeat component.
+
+        Components are included in every future heartbeat/status payload.
+        This lets services report subsystem health such as registry, database,
+        scheduler, cache, AI provider, or queue state using one shared schema.
+        """
+        if not name:
+            return {}
+        payload = component_status(status=status, message=message, **fields)
+        self.heartbeat_components[str(name)] = payload
+        return payload
 
     def clear_heartbeat_component(self, name):
         self.heartbeat_components.pop(str(name), None)
+        return dict(self.heartbeat_components)
 
     def set_heartbeat_compatibility(self, **fields):
         self.heartbeat_compatibility.update({key: value for key, value in fields.items() if value is not None})
         return dict(self.heartbeat_compatibility)
 
-    def unified_heartbeat_payload(
-        self,
-        *,
-        status=None,
-        current_state=None,
-        components=None,
-        metrics=None,
-        compatibility=None,
-        diagnostics=None,
-        last_error=None,
-    ):
+    def unified_heartbeat_payload(self, status=None, current_state=None, components=None, metrics=None, compatibility=None, diagnostics=None, last_error=None):
         merged_components = dict(self.heartbeat_components)
-        merged_components.update(dict(components or {}))
+        merged_components.setdefault(
+            "capabilities",
+            component_status(
+                status="healthy",
+                message="Service capability registry is available.",
+                capability_schema_version=self.capability_summary().get("schema_version"),
+                capability_count=self.capability_summary().get("count"),
+                capabilities=self.capability_summary().get("keys"),
+                categories=self.capability_summary().get("categories"),
+            ),
+        )
+        if components:
+            merged_components.update(components)
         merged_compatibility = dict(self.heartbeat_compatibility)
-        merged_compatibility.update(dict(compatibility or {}))
-        merged_compatibility.setdefault("sdk_version", self.sdk_version)
-        merged_compatibility.setdefault("application_version", self.version)
+        if compatibility:
+            merged_compatibility.update(compatibility)
+        merged_metrics = self.metrics_snapshot()
+        merged_metrics.setdefault("capability_registry", self.capability_payload())
+        merged_metrics.setdefault("capability_summary", self.capability_summary())
+        if metrics:
+            merged_metrics["application"] = metrics
         return build_unified_heartbeat(
             service_key=self.service_key,
             service_name=self.name,
-            status=status or self._last_status or "online",
+            service_version=self.version,
+            status=status or self._last_status or "healthy",
             current_state=current_state or self._last_state or "Running",
             components=merged_components,
-            metrics=metrics or self.metrics_snapshot(),
+            metrics=merged_metrics,
             compatibility=merged_compatibility,
-            diagnostics=diagnostics if diagnostics is not None else self.diagnostics(),
+            diagnostics=diagnostics or self.diagnostics(),
             last_error=last_error if last_error is not None else self._last_error,
         )
 
-    def status(
-        self,
-        status="healthy",
-        current_state="Running",
-        last_success=None,
-        last_error=None,
-        last_event_title=None,
-        last_event_level=None,
-        metrics=None,
-        components=None,
-        compatibility=None,
-        diagnostics=None,
-    ):
-        self._last_status = status
-        self._last_state = current_state
-        if last_success is not None:
-            self._last_success = last_success
-        if last_error is not None:
-            self._last_error = last_error
-        if last_event_title is not None:
-            self._last_event_title = last_event_title
-        if last_event_level is not None:
-            self._last_event_level = last_event_level
-        if metrics:
-            self.merge_metrics(metrics)
-        payload = {
-            "service_key": self.service_key,
-            "name": self.name,
-            "status": status,
-            "current_state": current_state,
-            "version": self.version,
-            "last_heartbeat": utc_now_iso(),
-            "last_success": self._last_success,
-            "last_error": self._last_error,
-            "last_event_title": self._last_event_title,
-            "last_event_level": self._last_event_level,
-            "heartbeat_protocol": HEARTBEAT_PROTOCOL,
-            "heartbeat": self.unified_heartbeat_payload(
-                status=status,
-                current_state=current_state,
-                components=components,
-                metrics=metrics,
-                compatibility=compatibility,
-                diagnostics=diagnostics,
-                last_error=last_error,
-            ),
-            **self.runtime_payload(),
-        }
-        ok = self._post(STATUS, payload)
-        if ok:
-            self.status_sent += 1
-            self.increment("status_sent")
-        return ok
+    def unified_heartbeat(self, status=None, current_state=None, components=None, metrics=None, compatibility=None, diagnostics=None, last_error=None):
+        """Publish a Titan SDK Unified Heartbeat.
 
-    def heartbeat(self, status="healthy", current_state="Running", metrics=None, last_error=None, **kwargs):
-        if metrics:
-            self.merge_metrics(metrics)
-        payload = {
-            "service_key": self.service_key,
-            "name": self.name,
-            "status": status,
-            "current_state": current_state,
-            "version": self.version,
-            "last_heartbeat": utc_now_iso(),
-            "last_success": self._last_success,
-            "last_error": last_error if last_error is not None else self._last_error,
-            "last_event_title": self._last_event_title,
-            "last_event_level": self._last_event_level,
-            **self.runtime_payload(),
-        }
-        ok = self._post(HEARTBEAT, payload, allow_queue=False)
-        if ok:
-            self.heartbeats_sent += 1
-            self.increment("heartbeats_sent")
-        return ok
-
-    def unified_heartbeat(
-        self,
-        status="healthy",
-        current_state="Running",
-        components=None,
-        metrics=None,
-        compatibility=None,
-        diagnostics=None,
-        last_error=None,
-    ):
-        if metrics:
-            self.merge_metrics(metrics)
+        This uses the existing /api/heartbeat endpoint, so no new service
+        environment variables or network permissions are required.
+        """
         payload = {
             "service_key": self.service_key,
             "name": self.name,
@@ -785,15 +720,43 @@ class TitanClient:
         else:
             titan_job.success()
 
+    def job_started(self, name, message=None, metadata=None, metrics=None):
+        job = self.begin_job(name, metadata=metadata)
+        return job.start(message=message, metrics=metrics)
+
+    def job_progress(self, name, current_state, message=None, metrics=None, level="info"):
+        progress_metrics = {
+            "job_name": name,
+            "job_status": "running",
+            "job_current_state": current_state,
+            "job_progress_at": utc_now_iso(),
+        }
+        if metrics:
+            progress_metrics.update(metrics)
+        self.merge_metrics(progress_metrics)
+        self.status(status="running", current_state=current_state, last_event_title=f"{name} Progress", last_event_level=level, metrics=progress_metrics)
+        self.event(f"{name} Progress", message or current_state, level=level, data={"job": progress_metrics})
+        return progress_metrics
+
+    def job_completed(self, name, message=None, metrics=None, elapsed_seconds=None):
+        job = self.begin_job(name)
+        job.started_at = time.time() - float(elapsed_seconds or 0)
+        return job.success(message=message, metrics=metrics)
+
+    def job_failed(self, name, error, message=None, metrics=None, elapsed_seconds=None):
+        job = self.begin_job(name)
+        job.started_at = time.time() - float(elapsed_seconds or 0)
+        return job.fail(error, message=message, metrics=metrics)
+
     def health_payload(self):
         if not self.enabled:
-            return {"health_status": "disabled", "health_message": "Titan SDK is disabled."}
+            return {"health_status": "disabled", "health_message": "Titan SDK reporting is disabled."}
         if not self.base_url:
-            return {"health_status": "warning", "health_message": "Titan OS URL is not configured."}
+            return {"health_status": "warning", "health_message": "Titan OS base URL is not configured."}
         if not self.api_key:
             return {"health_status": "warning", "health_message": "Titan OS API key is not configured."}
         if self.queue_size() > 0:
-            return {"health_status": "warning", "health_message": f"{self.queue_size()} request(s) waiting in retry queue."}
+            return {"health_status": "warning", "health_message": f"{self.queue_size()} request(s) waiting in SDK retry queue."}
         if self.counters.get("errors", 0) > 0:
             return {"health_status": "warning", "health_message": f"Service has reported {self.counters.get('errors', 0)} error(s) since startup."}
         return {"health_status": "healthy", "health_message": "Service is operating normally."}
@@ -850,7 +813,9 @@ class TitanClient:
             "operations_registered": len(self.operations()),
         }
 
+
     def probation_request(self, *, guild_id, member_id, approved_by, reason, duration_days=14, idempotency_key=None, attendance_dates=None):
+        """Queue an approved probation request through Titan Control Center."""
         payload = {
             "source_service": self.service_key,
             "guild_id": int(guild_id),
@@ -863,32 +828,23 @@ class TitanClient:
         }
         return self._post(PROBATION_REQUESTS, payload, allow_queue=True)
 
-    def probation_requests_pending(self, *, limit=100):
+    def probation_pending(self, limit=25):
+        """Return pending probation handoffs for a trusted consumer service."""
         if not self.is_ready():
             return []
-        try:
-            response = requests.get(
-                self._url(f"{PROBATION_REQUESTS_PENDING}?limit={max(1, min(500, int(limit)))}"),
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return list(data.get("requests") or []) if isinstance(data, dict) else []
-        except Exception as error:
-            self.logger.error("Failed to fetch pending probation requests: %s", error)
-            return []
-
-    def probation_request_ack(self, request_id, *, status, result=None, error=""):
-        return self._post(
-            probation_request_ack(str(request_id)),
-            {
-                "status": str(status),
-                "result": dict(result or {}),
-                "error": str(error or ""),
-            },
-            allow_queue=True,
+        response = requests.get(
+            self._url(f"{PROBATION_REQUESTS_PENDING}?limit={max(1, min(100, int(limit)))}"),
+            headers=self._headers(), timeout=self.timeout,
         )
+        response.raise_for_status()
+        return response.json().get("requests", [])
+
+    def probation_ack(self, request_id, *, status, result="", probation_id=None):
+        """Acknowledge completion, duplication, rejection, or retry of a handoff."""
+        payload = {"status": str(status), "result": str(result)[:1000]}
+        if probation_id is not None:
+            payload["probation_id"] = int(probation_id)
+        return self._post(probation_request_ack(request_id), payload, allow_queue=False)
 
     def _headers(self):
         return {"Content-Type": "application/json", "X-Titan-API-Key": self.api_key or ""}
@@ -948,13 +904,8 @@ class TitanClient:
             return False
 
     def _retry_delay(self, attempts):
-        deterministic_delay = min(
-            DEFAULT_RETRY_BASE_DELAY * (2 ** max(0, attempts - 1)),
-            DEFAULT_RETRY_MAX_DELAY,
-        )
-        lower = deterministic_delay * 0.8
-        upper = min(deterministic_delay * 1.2, DEFAULT_RETRY_MAX_DELAY)
-        return random.uniform(lower, upper)
+        delay = DEFAULT_RETRY_BASE_DELAY * (2 ** max(0, attempts - 1))
+        return min(delay, DEFAULT_RETRY_MAX_DELAY)
 
     def _flush_queue_once(self):
         if not self.is_ready():
@@ -1011,38 +962,255 @@ class TitanClient:
             "category": self.category,
             "icon": self.icon,
             "route": self.route,
+            "service_type": self.service_type,
+            "repository": self.repository,
+            "environment": self.environment,
+            "deployment": self.deployment,
+            "dependencies": self.dependencies,
             "capabilities": self.capabilities,
             "capability_registry": self.capability_payload(),
+            "capability_summary": self.capability_summary(),
             "operations": self.operations(),
-            "runtime": self.runtime_payload(),
+            "registered_at": utc_now_iso(),
+            **self.runtime_payload(),
         }
-        return self._post(REGISTER_SERVICE, payload)
+        ok = self._post(REGISTER_SERVICE, payload)
+        if ok:
+            self.logger.info("Registered service: %s", self.service_key)
+        else:
+            self.logger.error("Failed to register service: %s", self.service_key)
+        return ok
 
-    def event(self, title, message, level="info", data=None):
+    def heartbeat(self, status=None, current_state=None):
+        if self.on_heartbeat:
+            try:
+                self.on_heartbeat(self)
+            except Exception as error:
+                self._handle_callback_error("on_heartbeat", error)
+        try:
+            payload = {
+                "service_key": self.service_key,
+                "name": self.name,
+                "status": status or self._last_status or "online",
+                "current_state": current_state or self._last_state or "Running",
+                "version": self.version,
+                "last_heartbeat": utc_now_iso(),
+                "last_success": self._last_success,
+                "last_error": self._last_error,
+                "last_event_title": self._last_event_title,
+                "last_event_level": self._last_event_level,
+                "heartbeat_protocol": HEARTBEAT_PROTOCOL,
+                "heartbeat": self.unified_heartbeat_payload(status=status, current_state=current_state),
+                **self.runtime_payload(),
+            }
+        except Exception as error:
+            self._handle_callback_error("heartbeat_payload", error)
+            payload = {
+                "service_key": self.service_key,
+                "name": self.name,
+                "status": "warning",
+                "current_state": current_state or self._last_state or "Running",
+                "version": self.version,
+                "last_heartbeat": utc_now_iso(),
+                "last_success": self._last_success,
+                "last_error": f"Heartbeat diagnostics unavailable: {error}",
+                "last_event_title": "Heartbeat Diagnostics Warning",
+                "last_event_level": "warning",
+                "heartbeat_protocol": HEARTBEAT_PROTOCOL,
+                "diagnostics_error": str(error),
+                **self.runtime_payload_minimal(),
+            }
+        ok = self._post(HEARTBEAT, payload, allow_queue=False)
+        if ok:
+            self.heartbeats_sent += 1
+            self.increment("heartbeats_sent")
+        return ok
+
+    def runtime_payload_minimal(self):
+        return {
+            "hostname": self.hostname,
+            "started_at": self.started_at,
+            "process_started_at_epoch": self.process_started_at_epoch,
+            "sdk_name": self.sdk_name,
+            "sdk_version": self.sdk_version,
+            "application_version": self.version,
+            "service_type": self.service_type,
+            "environment": self.environment,
+            "uptime_seconds": self.uptime_seconds(),
+            "queue_size": self.queue_size(),
+            "successful_posts": self.successful_posts,
+            "failed_posts": self.failed_posts,
+            "heartbeats_sent": self.heartbeats_sent,
+            "health_status": "warning",
+            "health_message": "Runtime diagnostics degraded; minimal heartbeat payload used.",
+        }
+
+    def status(
+        self,
+        status="healthy",
+        current_state="Running",
+        metrics=None,
+        last_success=None,
+        last_error=None,
+        last_event_title=None,
+        last_event_level="info",
+    ):
+        self._last_status = status
+        self._last_state = current_state
+        self._last_success = last_success or self._last_success
+        self._last_error = last_error or self._last_error
+        self._last_event_title = last_event_title or self._last_event_title
+        self._last_event_level = last_event_level or self._last_event_level
+
+        merged_metrics = self.metrics_snapshot()
+        merged_metrics.setdefault("capability_registry", self.capability_payload())
+        merged_metrics.setdefault("capability_summary", self.capability_summary())
+        if metrics:
+            merged_metrics["application"] = metrics
+
         payload = {
             "service_key": self.service_key,
-            "title": title,
-            "message": message,
-            "level": level,
-            "timestamp": utc_now_iso(),
-            "data": data or {},
+            "name": self.name,
+            "status": status,
+            "current_state": current_state,
+            "version": self.version,
+            "updated_at": utc_now_iso(),
+            "last_success": self._last_success,
+            "last_error": self._last_error,
+            "last_event": self._last_event_title,
+            "last_event_title": self._last_event_title,
+            "last_event_level": self._last_event_level,
+            "metrics": merged_metrics,
+            **self.runtime_payload(),
         }
+        ok = self._post(STATUS, payload)
+        if ok:
+            self.status_sent += 1
+            self.increment("status_sent")
+        return ok
+
+    def event(
+        self,
+        title,
+        message=None,
+        level="info",
+        data=None,
+        event_type=None,
+        subject_id=None,
+        subject_type=None,
+        correlation_id=None,
+        tags=None,
+        source_service=None,
+        platform_event=None,
+        **metadata,
+    ):
+        """Publish a Titan event.
+
+        Backward compatible with Titan SDK v1.4.0 while adding Titan SDK
+        v1.5.0 Platform Event metadata. Existing calls such as
+        titan.event(title="Started", message="...") continue to work.
+
+        Optional typed-event fields let services coordinate without direct
+        bot-to-bot coupling, for example event_type="member.hiatus.started".
+        """
+        if level == "warning":
+            self.increment("warnings")
+        if level in ("error", "critical", "failed"):
+            self.increment("errors")
+
+        created_at = utc_now_iso()
+        event_data = data or {}
+        is_platform_event = bool(platform_event or event_type)
+
+        self._last_event_title = title
+        self._last_event_level = level
+
+        payload = {
+            "service_key": self.service_key,
+            "module": self.name,
+            "title": title,
+            "message": message or title,
+            "level": level,
+            "source": source_service or self.name,
+            "created_at": created_at,
+            "version": self.version,
+            "data": event_data,
+            "sdk": {
+                "sdk_name": self.sdk_name,
+                "sdk_version": self.sdk_version,
+                "service_key": self.service_key,
+                "service_type": self.service_type,
+            },
+        }
+
+        if is_platform_event:
+            platform_payload = {
+                "event_type": event_type or title,
+                "subject_id": str(subject_id) if subject_id is not None else None,
+                "subject_type": subject_type,
+                "correlation_id": correlation_id,
+                "tags": list(tags or []),
+                "source_service": source_service or self.service_key,
+                "published_at": created_at,
+                "metadata": metadata or {},
+            }
+            clean_platform_payload = {
+                key: value for key, value in platform_payload.items()
+                if value not in (None, "", [])
+            }
+            payload.update(clean_platform_payload)
+            payload["platform_event"] = True
+
         ok = self._post(EVENT, payload)
         if ok:
             self.events_sent += 1
             self.increment("events_sent")
         return ok
 
-    def events(self, events):
-        payload = {"service_key": self.service_key, "events": events}
-        return self._post(EVENTS, payload)
+    def platform_event(
+        self,
+        event_type,
+        title=None,
+        message=None,
+        level="info",
+        subject_id=None,
+        subject_type=None,
+        correlation_id=None,
+        tags=None,
+        data=None,
+        **metadata,
+    ):
+        """Publish a typed Titan Platform Event."""
+        return self.event(
+            title=title or event_type,
+            message=message or title or event_type,
+            level=level,
+            data=data or {},
+            event_type=event_type,
+            subject_id=subject_id,
+            subject_type=subject_type,
+            correlation_id=correlation_id,
+            tags=tags or [],
+            platform_event=True,
+            **metadata,
+        )
 
-    def metrics(self, metrics):
-        self.merge_metrics(metrics)
+    def publish_event(self, *args, **kwargs):
+        """Alias for platform_event for service code readability."""
+        return self.platform_event(*args, **kwargs)
+
+    def metric(self, name, value):
+        self.set_gauge(name, value)
+        return self.metrics({name: value})
+
+    def metrics(self, metrics=None):
+        if metrics:
+            self.merge_metrics(metrics)
         payload = {
             "service_key": self.service_key,
-            "metrics": metrics,
-            "timestamp": utc_now_iso(),
+            "metrics": self.metrics_snapshot(),
+            "updated_at": utc_now_iso(),
+            **self.runtime_payload(),
         }
         ok = self._post(METRICS, payload)
         if ok:
@@ -1050,45 +1218,89 @@ class TitanClient:
             self.increment("metrics_sent")
         return ok
 
-    def start(self):
+    def warning(self, title, message=None, data=None):
+        return self.event(title, message, level="warning", data=data)
+
+    def error(self, title, message=None, data=None):
+        return self.event(title, message, level="error", data=data)
+
+    def success(self, title, message=None, data=None):
+        return self.event(title, message, level="success", data=data)
+
+    def log(self, title, message=None, data=None):
+        return self.event(title, message, level="info", data=data)
+
+    def _heartbeat_loop(self):
+        while self._running:
+            try:
+                self.heartbeat(status="online", current_state=self._last_state or "Running")
+            except Exception as error:
+                # Heartbeat threads must never die because a diagnostics provider,
+                # logger, network request, or callback failed. Record and continue.
+                self._handle_callback_error("heartbeat_loop", error)
+            time.sleep(self.heartbeat_interval)
+
+    def start(self, current_state="Running", publish_event=True):
+        if not self.enabled:
+            self.logger.warning("SDK disabled.")
+            return False
         if self._running:
-            return self
+            self.logger.info("Service already running: %s", self.service_key)
+            return True
+        self.logger.info("Starting service: %s", self.service_key)
+        self.logger.info("Config report: %s", self.config_report())
+        if not self.is_ready():
+            self.logger.error("Not ready. Missing TITAN_OS_BASE_URL/TITAN_OS_URL or TITAN_OS_API_KEY.")
+            return False
+
         self._running = True
         self.start_count += 1
         self.increment("starts")
+        self._last_status = "healthy"
+        self._last_state = current_state
+        self._last_success = "Service started successfully."
+        self._last_error = "No errors"
+        self._last_event_title = "Service Started"
+        self._last_event_level = "success"
+
         if self.on_start:
             try:
                 self.on_start(self)
             except Exception as error:
                 self._handle_callback_error("on_start", error)
+
+        self.register_service()
+        self.status(status="healthy", current_state=current_state, last_success="Service started successfully.", last_event_title="Service Started", last_event_level="success")
+        if publish_event:
+            self.event("Service Started", f"{self.name} started successfully.", level="success")
+        self.heartbeat(status="online", current_state=current_state)
+
         self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        self._queue_thread = threading.Thread(target=self._queue_loop, daemon=True)
         self._heartbeat_thread.start()
+        self._queue_thread = threading.Thread(target=self._queue_loop, daemon=True)
         self._queue_thread.start()
-        return self
+        self.logger.info("Service running: %s", self.service_key)
+        return True
 
     def stop(self):
         if not self._running:
-            return self
-        self._running = False
-        self.stop_count += 1
-        self.increment("stops")
+            self.logger.info("Service already stopped: %s", self.service_key)
+            return True
+        self.status(status="stopping", current_state="Stopping", last_event_title="Service Stopping", last_event_level="info")
+        self.event("Service Stopping", f"{self.name} is shutting down.", level="info")
+        self.metrics()
+        self.flush_queue(max_items=25)
         if self.on_stop:
             try:
                 self.on_stop(self)
             except Exception as error:
                 self._handle_callback_error("on_stop", error)
-        return self
-
-    def _heartbeat_loop(self):
-        while self._running:
-            try:
-                if self.on_heartbeat:
-                    try:
-                        self.on_heartbeat(self)
-                    except Exception as error:
-                        self._handle_callback_error("on_heartbeat", error)
-                self.heartbeat(status="healthy", current_state="Running")
-            except Exception as error:
-                self._handle_callback_error("heartbeat_loop", error)
-            time.sleep(self.heartbeat_interval)
+        self._running = False
+        self.stop_count += 1
+        self.increment("stops")
+        self.heartbeat(status="offline", current_state="Stopped")
+        self.status(status="offline", current_state="Stopped", last_event_title="Service Stopped", last_event_level="info")
+        self.event("Service Stopped", f"{self.name} stopped.", level="info")
+        self.flush_queue(max_items=25)
+        self.logger.info("Service stopped: %s", self.service_key)
+        return True
