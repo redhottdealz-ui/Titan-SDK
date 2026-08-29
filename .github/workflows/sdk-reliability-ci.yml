@@ -31,11 +31,12 @@ jobs:
       - name: Compile SDK modules
         run: |
           python -m py_compile titan_sdk/client.py
+          python -m py_compile titan_sdk/communications.py
           python -m py_compile titan_sdk/heartbeat.py
           python -m py_compile titan_sdk/capabilities.py
           python -m py_compile titan_sdk/retry.py
           python -m py_compile titan_sdk/health.py
           python -m py_compile titan_sdk/reliability.py
 
-      - name: Run communications health foundation regressions
-        run: python -m pytest tests/test_communications_health_foundation.py -q
+      - name: Run Titan SDK regressions
+        run: python -m pytest tests -q
