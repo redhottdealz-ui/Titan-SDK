@@ -99,6 +99,24 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         self.assertEqual(client.queue_size(), 1)
         self.assertTrue(client.control_center_outage_active())
 
+    def test_reconstructable_delivery_failure_is_not_queued_or_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            client = self.client(durable_delivery_path=durable_path)
+            with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")):
+                self.assertFalse(client.deliver("/api/register", {"capabilities": ["discord"]}, delivery_class="reconstructable"))
+            self.assertEqual(client.queue_size(), 0)
+            self.assertEqual(client.durable_delivery_count(), 0)
+            self.assertTrue(client.control_center_outage_active())
+
+    def test_reconstructable_delivery_is_allowed_to_retry_after_outage(self):
+        client = self.client()
+        with patch.object(client, "_send_now", side_effect=[RuntimeError("control center unavailable"), True]) as send:
+            self.assertFalse(client.deliver("/api/register", {"capabilities": ["discord"]}, delivery_class="reconstructable"))
+            self.assertTrue(client.deliver("/api/register", {"capabilities": ["discord"]}, delivery_class="reconstructable"))
+        self.assertEqual(send.call_count, 2)
+        self.assertFalse(client.control_center_outage_active())
+
     def test_outage_suppresses_repeated_ephemeral_transport_attempts(self):
         client = self.client()
         with patch.object(client, "_send_now", side_effect=RuntimeError("control center unavailable")) as send:
