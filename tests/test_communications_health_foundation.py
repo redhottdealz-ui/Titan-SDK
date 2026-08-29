@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from titan_sdk.communications import TitanCommunicationsClient
-from titan_sdk.constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_DELAY
+from titan_sdk.constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_ATTEMPTS, DEFAULT_RETRY_MAX_DELAY
 from titan_sdk.heartbeat import HEARTBEAT_PROTOCOL
 
 
@@ -158,6 +158,36 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
                 self.assertTrue(second._flush_queue_once())
             self.assertEqual(second.durable_delivery_count(), 0)
             self.assertEqual(second.queue_size(), 0)
+
+    def test_failed_retry_retains_durable_delivery_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            first = self.client(durable_delivery_path=durable_path)
+            with patch.object(first, "_send_now", side_effect=RuntimeError("control center unavailable")):
+                self.assertFalse(first.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+
+            second = self.client(durable_delivery_path=durable_path)
+            with patch.object(second, "_send_now", side_effect=RuntimeError("still unavailable")), patch("titan_sdk.communications.time.sleep"):
+                self.assertFalse(second._flush_queue_once())
+            self.assertEqual(second.durable_delivery_count(), 1)
+            self.assertEqual(second.queue_size(), 1)
+
+    def test_max_attempt_drop_does_not_resurrect_durable_delivery_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            durable_path = Path(directory) / "important-deliveries.json"
+            first = self.client(durable_delivery_path=durable_path)
+            with patch.object(first, "_send_now", side_effect=RuntimeError("control center unavailable")):
+                self.assertFalse(first.deliver("/api/workflow-handoff", {"handoff_id": "h-1"}, delivery_class="important"))
+
+            second = self.client(durable_delivery_path=durable_path)
+            second._queue.items[0]["attempts"] = DEFAULT_RETRY_MAX_ATTEMPTS - 1
+            with patch.object(second, "_send_now", side_effect=RuntimeError("still unavailable")):
+                self.assertFalse(second._flush_queue_once())
+            self.assertEqual(second.queue_size(), 0)
+            self.assertEqual(second.durable_delivery_count(), 0)
+
+            third = self.client(durable_delivery_path=durable_path)
+            self.assertEqual(third.queue_size(), 0)
 
 
 if __name__ == "__main__":
