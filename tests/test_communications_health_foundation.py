@@ -77,6 +77,24 @@ class CommunicationsHealthFoundationTests(unittest.TestCase):
         upper = min(deterministic_delay * 1.2, DEFAULT_RETRY_MAX_DELAY)
         self.assertTrue(all(lower <= delay <= upper for delay in delays))
 
+    def test_capability_sync_skips_unchanged_state_and_publishes_real_changes(self):
+        client = self.client(capabilities=["discord"])
+        with patch("titan_sdk.client.TitanClient.register_service", return_value=True) as register:
+            self.assertTrue(client.sync_capabilities_if_changed())
+            self.assertFalse(client.sync_capabilities_if_changed())
+            client.add_capability("scheduler")
+            self.assertTrue(client.sync_capabilities_if_changed())
+
+        self.assertEqual(register.call_count, 2)
+
+    def test_failed_capability_sync_is_not_marked_as_current(self):
+        client = self.client(capabilities=["discord"])
+        with patch("titan_sdk.client.TitanClient.register_service", side_effect=[False, True]) as register:
+            self.assertFalse(client.sync_capabilities_if_changed())
+            self.assertTrue(client.sync_capabilities_if_changed())
+
+        self.assertEqual(register.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
