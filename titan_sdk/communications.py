@@ -82,6 +82,16 @@ class TitanCommunicationsClient(TitanClient):
         rows.append({"path": path, "payload": payload})
         self._save_durable_deliveries(rows)
 
+    def _remove_durable_delivery(self, path, payload):
+        if self._durable_delivery_path is None:
+            return
+        rows = self._load_durable_deliveries()
+        for index, item in enumerate(rows):
+            if item.get("path") == path and item.get("payload") == payload:
+                del rows[index]
+                self._save_durable_deliveries(rows)
+                return
+
     def durable_delivery_count(self) -> int:
         return len(self._load_durable_deliveries())
 
@@ -123,6 +133,40 @@ class TitanCommunicationsClient(TitanClient):
         if sent:
             self._control_center_outage = False
         return sent
+
+    def _flush_queue_once(self):
+        if not self.is_ready():
+            return False
+        with self._queue_lock:
+            item = self._queue.pop()
+        if not item:
+            return False
+        item["attempts"] = int(item.get("attempts", 0)) + 1
+        try:
+            self._send_now(item["path"], item["payload"])
+            self._remove_durable_delivery(item["path"], item["payload"])
+            self._control_center_outage = False
+            self.queue_flushes += 1
+            self.increment("queue_flushes")
+            self.logger.info("Flushed queued request: %s", item["path"])
+            return True
+        except Exception as error:
+            self._control_center_outage = True
+            self.logger.error("Queue flush failed: %s", error)
+            self.last_failed_post = self.started_at
+            self.failed_posts += 1
+            self.queue_retries += 1
+            self.increment("posts_failed")
+            self.increment("queue_retries")
+            if item["attempts"] < 10:
+                with self._queue_lock:
+                    self._queue.push_front(item)
+            if self.on_error:
+                try:
+                    self.on_error(self, error)
+                except Exception as callback_error:
+                    self.logger.error("on_error callback failed: %s", callback_error)
+            return False
 
     def _retry_delay(self, attempts):
         """Preserve exponential backoff while adding bounded fleet-safe jitter."""
