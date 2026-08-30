@@ -16,6 +16,7 @@ from pathlib import Path
 from .client import TitanClient
 from .constants import DEFAULT_RETRY_BASE_DELAY, DEFAULT_RETRY_MAX_ATTEMPTS, DEFAULT_RETRY_MAX_DELAY
 from .capabilities import build_capability_payload
+from .api_routes import HEARTBEAT, REGISTER_SERVICE
 from .runtime import utc_now_iso
 
 
@@ -166,6 +167,20 @@ class TitanCommunicationsClient(TitanClient):
         if sent:
             self._clear_control_center_outage()
         return sent
+
+    def _post(self, path, payload, allow_queue=True):
+        """Route core communications paths through their Phase 1A delivery class.
+
+        Only heartbeat and service-registration traffic are intercepted here so
+        existing TitanClient behavior for every other inherited endpoint remains
+        unchanged. Heartbeats are ephemeral; registration/capability state is
+        reconstructable and must never create stale retry-queue entries.
+        """
+        if path == HEARTBEAT:
+            return self.deliver(path, payload, delivery_class="ephemeral")
+        if path == REGISTER_SERVICE:
+            return self.deliver(path, payload, delivery_class="reconstructable")
+        return super()._post(path, payload, allow_queue=allow_queue)
 
     def _flush_queue_once(self):
         if not self.is_ready():
